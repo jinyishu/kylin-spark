@@ -170,8 +170,8 @@
     <scala.binary.version>2.11</scala.binary.version>
     <codehaus.jackson.version>1.9.13</codehaus.jackson.version>
     <jackson-mapper-asl.version>1.9.13-cloudera.1</jackson-mapper-asl.version>
-    <fasterxml.jackson.version>2.9.10</fasterxml.jackson.version>
-    <fasterxml.jackson.databind.version>2.9.10.8</fasterxml.jackson.databind.version>
+    <fasterxml.jackson.version>2.12.6</fasterxml.jackson.version>
+    <fasterxml.jackson.databind.version>2.12.6.1</fasterxml.jackson.databind.version>
     <snappy.version>1.1.2.6</snappy.version>
     <netlib.java.version>1.1.2</netlib.java.version>
     <calcite.version>1.2.0-incubating</calcite.version>
@@ -2362,7 +2362,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
-          <version>3.0.0</version>
+          <version>3.2.1</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -2638,18 +2638,18 @@
     </plugins>
 
   </build>
-    <distributionManagement>
-      <snapshotRepository>
-        <id>${snapshots.id}</id>
-        <name>${snapshots.name}</name>
-        <url>${snapshots.url}</url>
-      </snapshotRepository>
-      <repository>
-        <id>${releases.id}</id>
-        <name>${releases.name}</name>
-        <url>${releases.url}</url>
-      </repository>
-    </distributionManagement>
+  <distributionManagement>
+    <repository>
+      <id>${repository.id}</id>
+      <url>${repository.url}</url>
+      <name>${repository.name}</name>
+    </repository>
+    <snapshotRepository>
+      <id>${repository.id.snapshots}</id>
+      <url>${repository.url.snapshots}</url>
+      <name>${repository.name.snapshots}</name>
+    </snapshotRepository>
+  </distributionManagement>
   <profiles>
     
 
