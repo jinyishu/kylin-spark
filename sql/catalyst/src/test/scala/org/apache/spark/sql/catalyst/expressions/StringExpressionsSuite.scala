@@ -483,6 +483,22 @@ class StringExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(new StringLocate(s2, s1, Literal.create(null, IntegerType)), 0, row4)
   }
 
+  test("REPLACE") {
+    val s1 = 'a.string.at(0)
+    val s2 = 'b.string.at(1)
+    val s3 = 'c.string.at(2)
+    val row1 = create_row("ABCdef(", "(", ")")
+    val row3 = create_row(null, ")", "(")
+    val row4 = create_row("hi", null, "?")
+    val row5 = create_row("hi", "h", null)
+
+    checkEvaluation(StringReplace(Literal("ABCdef("), Literal("("), Literal(")")), "ABCdef)", row1)
+    checkEvaluation(StringReplace(Literal("ABCdef("), Literal("def"), Literal("DEF")), "ABCDEF(", row1)
+    checkEvaluation(StringReplace(s1, s2, s3), null, row3)
+    checkEvaluation(StringReplace(s1, s2, s3), null, row4)
+    checkEvaluation(StringReplace(s1, s2, s3), null, row5)
+  }
+
   test("LPAD/RPAD") {
     val s1 = 'a.string.at(0)
     val s2 = 'b.int.at(1)

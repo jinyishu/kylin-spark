@@ -293,6 +293,7 @@ object FunctionRegistry {
     expression[Like]("like"),
     expression[Lower]("lower"),
     expression[StringLocate]("locate"),
+    expression[StringReplace]("replace"),
     expression[StringLPad]("lpad"),
     expression[StringTrimLeft]("ltrim"),
     expression[JsonTuple]("json_tuple"),
