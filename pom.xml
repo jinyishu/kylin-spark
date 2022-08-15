@@ -2515,19 +2515,19 @@
 
   </build>
     <distributionManagement>
-      <snapshotRepository>
-        <id>${snapshots.id}</id>
-        <name>${snapshots.name}</name>
-        <url>${snapshots.url}</url>
-      </snapshotRepository>
-      <repository>
-        <id>${releases.id}</id>
-        <name>${releases.name}</name>
-        <url>${releases.url}</url>
-      </repository>
+        <repository>
+            <id>${repository.id}</id>
+            <url>${repository.url}</url>
+            <name>${repository.name}</name>
+        </repository>
+        <snapshotRepository>
+            <id>${repository.id.snapshots}</id>
+            <url>${repository.url.snapshots}</url>
+            <name>${repository.name.snapshots}</name>
+        </snapshotRepository>
     </distributionManagement>
   <profiles>
-    
+
 
     <!--
       This profile is enabled automatically by the sbt built. It changes the scope for the guava
