@@ -779,6 +779,39 @@ case class StringLocate(substr: Expression, str: Expression, start: Expression)
   override def prettyName: String = "locate"
 }
 
+@ExpressionDescription(
+  usage = "_FUNC_(str, search[, replace]) - Replaces all occurrences of `search` with `replace`.",
+  extended = """
+    Examples:
+      > SELECT _FUNC_('ABCabc', 'abc', 'DEF');
+       ABCDEF
+  """)
+case class StringReplace(srcExpr: Expression, searchExpr: Expression, replaceExpr: Expression)
+  extends TernaryExpression with ImplicitCastInputTypes {
+
+  override def children: Seq[Expression] = srcExpr :: searchExpr :: replaceExpr :: Nil
+  override def dataType: DataType = StringType
+  override def inputTypes: Seq[DataType] = Seq(StringType, StringType, StringType)
+
+  override def nullSafeEval(srcEval: Any, searchEval: Any, replaceEval: Any): Any = {
+    val s = srcEval.asInstanceOf[UTF8String].clone().toString().replace(
+      searchEval.asInstanceOf[UTF8String].clone().toString()
+      , replaceEval.asInstanceOf[UTF8String].clone().toString())
+    val ss = UTF8String.fromString(s)
+    ss
+  }
+
+  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
+    nullSafeCodeGen(ctx, ev, (src, search, replace) => {
+      s"""${ev.value} =
+         | UTF8String.fromString($src.toString().replace($search.toString(), $replace.toString()));
+         | """.stripMargin
+    })
+  }
+
+  override def prettyName: String = "replace"
+}
+
 /**
  * Returns str, left-padded with pad to a length of len.
  */
