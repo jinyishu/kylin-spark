@@ -16,14 +16,18 @@
  */
 package org.apache.spark.deploy.k8s.features
 
+import java.util
+
 import io.fabric8.kubernetes.api.model._
 import io.fabric8.volcano.client.DefaultVolcanoClient
 import io.fabric8.volcano.scheduling.v1beta1.{PodGroup, PodGroupSpec}
 
 import org.apache.spark.deploy.k8s.{KubernetesConf, KubernetesDriverConf, KubernetesExecutorConf, SparkPod}
+import org.apache.spark.internal.Logging
 
 private[spark] class VolcanoFeatureStep extends KubernetesDriverCustomFeatureConfigStep
-  with KubernetesExecutorCustomFeatureConfigStep {
+  with KubernetesExecutorCustomFeatureConfigStep with Logging{
+
   import VolcanoFeatureStep._
 
   private var kubernetesConf: KubernetesConf = _
@@ -50,16 +54,28 @@ private[spark] class VolcanoFeatureStep extends KubernetesDriverCustomFeatureCon
     pg.setMetadata(metadata)
 
     var spec = pg.getSpec
-    if (spec == null) spec = new PodGroupSpec
+    if (spec == null) {
+      val minMember = Integer.parseInt(
+        kubernetesConf.getOption(POD_GROUP_SPEC_MIN_MEMBER).getOrElse("1"))
+      var minResources = new util.HashMap[String, Quantity]
+      minResources.put("cpu",
+        new Quantity(kubernetesConf.getOption(POD_GROUP_SPEC_MIN_CORE).getOrElse("1")))
+      minResources.put("memory",
+        new Quantity(kubernetesConf.getOption(POD_GROUP_SPEC_MIN_MEMORY).getOrElse("128Mi")))
+      val queueName = kubernetesConf.getOption(POD_GROUP_SPEC_QUEUE).getOrElse(null)
+      val priorityClassName =
+        kubernetesConf.getOption(POD_GROUP_SPEC_PRIORITY_CLASS_NAME).getOrElse(null)
+      spec = new PodGroupSpec(minMember, minResources, priorityClassName, queueName)
+    }
     pg.setSpec(spec)
-
+    logInfo(s"podGroup spec ${pg.getSpec}")
     Seq(pg)
   }
 
   override def configurePod(pod: SparkPod): SparkPod = {
     val k8sPodBuilder = new PodBuilder(pod.pod)
       .editMetadata()
-        .addToAnnotations(POD_GROUP_ANNOTATION, podGroupName)
+      .addToAnnotations(POD_GROUP_ANNOTATION, podGroupName)
       .endMetadata()
     val k8sPod = k8sPodBuilder.build()
     SparkPod(k8sPod, pod.container)
@@ -69,4 +85,11 @@ private[spark] class VolcanoFeatureStep extends KubernetesDriverCustomFeatureCon
 private[spark] object VolcanoFeatureStep {
   val POD_GROUP_ANNOTATION = "scheduling.k8s.io/group-name"
   val POD_GROUP_TEMPLATE_FILE_KEY = "spark.kubernetes.scheduler.volcano.podGroupTemplateFile"
+  val POD_GROUP_SPEC_QUEUE = "spark.kubernetes.scheduler.volcano.podGroup.spec.queueName"
+  val POD_GROUP_SPEC_MIN_CORE = "spark.kubernetes.scheduler.volcano.podGroup.spec.minCore"
+  val POD_GROUP_SPEC_MIN_MEMORY = "spark.kubernetes.scheduler.volcano.podGroup.spec.minMemory"
+  val POD_GROUP_SPEC_MIN_MEMBER = "spark.kubernetes.scheduler.volcano.podGroup.spec.minMember"
+  val POD_GROUP_SPEC_PRIORITY_CLASS_NAME =
+    "spark.kubernetes.scheduler.volcano.podGroup.spec.PriorityClassName"
+
 }
