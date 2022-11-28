@@ -111,6 +111,13 @@ case class Attribution(windowLitExpr: Expression,
       measuresExpr.children.length
     }
 
+  lazy val aheadCount: Int =
+    if (lookAheadNameExpr == null) {
+      0
+    } else {
+      val s = lookAheadNameExpr.toString
+      s.split(" ").filter(_.startsWith("a")).length
+    }
   // relation model type
   lazy val eventRelationType: String = eventRelationTypeLitExpr.eval().toString
   val NONE = "NONE"
@@ -119,16 +126,29 @@ case class Attribution(windowLitExpr: Expression,
   val TARGET_TO_AHEAD = "TARGET_TO_AHEAD"
   val TARGET_TO_AHEAD_TO_SOURCE = "TARGET_TO_AHEAD_TO_SOURCE"
 
+  // attribution model type
+  lazy val modelType: String = modelTypeLitExpr.eval().toString
+  val FIRST = "FIRST"
+  val LAST = "LAST"
+  val LINEAR = "LINEAR"
+  val POSITION = "POSITION"
+  val DECAY = "DECAY"
+
   // map{evt_name: array{dim_expr}}
-  val relationExprs: mutable.HashMap[String, mutable.ArrayBuffer[Expression]] =
-    mutable.HashMap[String, mutable.ArrayBuffer[Expression]]()
+  var relationExprs: mutable.HashMap[String, mutable.ArrayBuffer[Expression]] = null
   // map{evt1_name: {evt2_name: array[tuple(idx1, idx2)]}
   // idx corresponds to idx in relationExprs's array
   // the map is bi-directional
-  val relations: mutable.HashMap[String, mutable.HashMap[String, mutable.ArrayBuffer[(Int, Int)]]] =
-  mutable.HashMap[String, mutable.HashMap[String, mutable.ArrayBuffer[(Int, Int)]]]()
+  var relations: mutable.HashMap[String,
+    mutable.HashMap[String, mutable.ArrayBuffer[(Int, Int)]]] = null
 
-  {
+  var dataTypeValue: DataType = null
+
+  override def createAggregationBuffer(): ListBuffer[AttrEvent] = ListBuffer[AttrEvent]()
+
+  private def parserRelations(): Unit = {
+    relationExprs = mutable.HashMap[String, mutable.ArrayBuffer[Expression]]()
+    relations = mutable.HashMap[String, mutable.HashMap[String, mutable.ArrayBuffer[(Int, Int)]]]()
     val idxMap = mutable.HashMap[String, mutable.HashMap[Expression, Int]]()
     for (elem <- eventRelations.children) {
       val relation = elem.asInstanceOf[CreateMap]
@@ -162,45 +182,54 @@ case class Attribution(windowLitExpr: Expression,
     }
   }
 
-  // attribution model type
-  lazy val modelType: String = modelTypeLitExpr.eval().toString
-  val FIRST = "FIRST"
-  val LAST = "LAST"
-  val LINEAR = "LINEAR"
-  val POSITION = "POSITION"
-  val DECAY = "DECAY"
-
-  override def createAggregationBuffer(): ListBuffer[AttrEvent] = ListBuffer[AttrEvent]()
-
   override def update(buffer: ListBuffer[AttrEvent], input: InternalRow): ListBuffer[AttrEvent] = {
     // convert single row to all possible events
     val names = evalEventNames(input)
     if (names.isEmpty) {
       return buffer
     }
-
+    if (relations == null) parserRelations
+    val ts = evalToLong(eventTsExpr, input)
     val events = names.map { case (eventType, name) =>
-      val ts = evalToLong(eventTsExpr, input)
       val relatedDim = if (relationExprs.contains(name)) {
-        relationExprs(name).map(expr => expr.eval(input)).toArray
+        relationExprs(name).map(expr => {
+          val dim = expr.eval(input)
+          if (dim == null) null else dim.toString
+        }).toArray
       } else {
         null
       }
-      val groupingInfo = groupingInfoExpr.eval(input)
+      val groupingInfo =
+        genericArrayData(groupingInfoExpr.eval(input).asInstanceOf[GenericArrayData])
 
       eventType match {
         case AttrEvent.TARGET if measureCount > 0 =>
           val measures = evalToArray(measuresExpr, input).map { m =>
             if (m == null) 0 else m.toString.toDouble
           }
-          AttrEvent(name, eventType, ts, relatedDim, groupingInfo, 0, measures)
+          AttrEvent(name, eventType, ts, relatedDim, groupingInfo, measures)
         case _ =>
-          AttrEvent(name, eventType, ts, relatedDim, groupingInfo, 0, Array.fill(measureCount)(0))
+          AttrEvent(name, eventType, ts, relatedDim, groupingInfo)
       }
     }
     buffer ++ events
   }
 
+  // groupingInfoExpr.dataType
+  private def genericArrayData(genericArrayData: GenericArrayData): String = {
+    if (genericArrayData == null) return null
+    val oldArray = genericArrayData.array
+    val size = oldArray.size
+    if (size == 0) {
+      return null
+    }
+    val sb = new StringBuilder()
+    for (i <- 0 until size) {
+      sb.append(oldArray.apply(i)).append("|")
+    }
+    sb.setLength(sb.length-1)
+    sb.toString()
+  }
   private def evalEventNames(input: InternalRow): Seq[(Int, String)] = {
     (modelType match {
       case NONE | TARGET_TO_SOURCE =>
@@ -219,109 +248,110 @@ case class Attribution(windowLitExpr: Expression,
 
   override def merge(buffer: ListBuffer[AttrEvent],
                      input: ListBuffer[AttrEvent]): ListBuffer[AttrEvent] = {
-    buffer ++ input
+    buffer ++= input
   }
 
   override def eval(buffer: ListBuffer[AttrEvent]): GenericArrayData = {
-    toResultForm(
-      eventRelationType match {
-        case NONE | TARGET_TO_SOURCE =>
-          doEvalSimple(buffer)
-        case AHEAD_ONLY | TARGET_TO_AHEAD | TARGET_TO_AHEAD_TO_SOURCE =>
-          doEvalWithLookAheadEvents(buffer)
-        case _ =>
-          throw new RuntimeException(s"unrecognized event relation type $eventRelationType")
-      }
-    )
+    toResultForm(doEval(buffer))
   }
 
-  // eval with no look ahead events
-  private def doEvalSimple(events: ListBuffer[AttrEvent]): ListBuffer[AttrEvent] = {
+  private def doEval(events: ListBuffer[AttrEvent]): ListBuffer[AttrEvent] = {
+    if (relations == null) parserRelations
     // reverse sort
     val sorted = events.sortBy(e => (- e.ts, - e.typeOrdering, e.name))
 
     // queue{target-> queue{source}}
-    val targetEvents = mutable.Queue[(AttrEvent, mutable.Stack[AttrEvent])]()
+    val targetEvents = mutable.Queue[AttrEvent]()
     val resultEvents = mutable.HashSet[AttrEvent]()
-
+    // count the number of all source events  by group
+    val counts: mutable.HashMap[(String, String), SourceCount] = mutable.HashMap[(String, String), SourceCount]()
+    var aheadTrueName: mutable.HashSet[String] = null
+    var aheadTrue: mutable.ListBuffer[AttrEvent] = null
     for (event <- sorted) {
+      // check out of window sequence and do calculation
+      while (targetEvents.nonEmpty &&
+        (!withinWindow(event, targetEvents.front) || targetEvents.front.last != null)) {
+        val target = targetEvents.dequeue()
+        resultEvents ++= calculateContrib(target)
+      }
       event.eventType match {
         case AttrEvent.TARGET =>
-          targetEvents.enqueue((event, mutable.Stack[AttrEvent]()))
-        case AttrEvent.SOURCE if targetEvents.nonEmpty =>
-          // check out of window sequence and do calculation
-          while (targetEvents.nonEmpty && !withinWindow(event, targetEvents.front._1)) {
-            val (target, sourceEvents) = targetEvents.dequeue()
-            resultEvents ++= calculateContrib(target, sourceEvents)
+          event.sourceEvents = mutable.Stack[AttrEvent]()
+          eventRelationType match {
+            case AHEAD_ONLY | TARGET_TO_AHEAD | TARGET_TO_AHEAD_TO_SOURCE =>
+              event.aheadEvents = mutable.ListBuffer[AttrEvent]()
+            case _ =>
           }
-
+          targetEvents.enqueue(event)
+        case AttrEvent.SOURCE =>
+          // count
+          val sc: SourceCount = counts.getOrElseUpdate(
+            (event.name, event.groupingInfos), SourceCount(0L)
+          )
+          sc.count += 1
           // check and enqueue source events
-          for ((target, sourceEvents) <- targetEvents) {
-            if (eventRelationType == NONE || related(target, event)) {
-              sourceEvents.push(event)
+          for (target <- targetEvents) {
+            eventRelationType match {
+              case NONE =>
+                updateValidSource(event, target)
+              case TARGET_TO_SOURCE  if related(target, event) =>
+                updateValidSource(event, target)
+              case AHEAD_ONLY | TARGET_TO_AHEAD | TARGET_TO_AHEAD_TO_SOURCE =>
+                if (aheadTrueName == null) {
+                  aheadTrueName = mutable.HashSet[String]()
+                  aheadTrue = mutable.ListBuffer[AttrEvent]()
+                }
+                for (ahead <- target.aheadEvents) {
+                  if (related(ahead, event)) {
+                    aheadTrueName.add(ahead.name)
+                    aheadTrue.append(ahead)
+                  }
+                }
+                if (aheadTrueName.size == aheadCount ) {
+                  updateValidSource(event, target)
+                  target.aheadEvents = target.aheadEvents.diff( aheadTrue)
+                }
+                aheadTrueName.clear()
+                aheadTrue.clear()
+              case _ =>
             }
           }
+        case AttrEvent.AHEAD =>
+            for (target <- targetEvents) {
+              if (eventRelationType == NONE || related(target, event)) {
+                target.aheadEvents.append(event)
+              }
+            }
         case _ =>
       }
     }
 
     // dequeue and calculate the remaining
-    for ((target, sourceEvents) <- targetEvents) {
-      resultEvents ++= calculateContrib(target, sourceEvents)
+    for (target <- targetEvents) {
+      resultEvents ++= calculateContrib(target)
     }
 
     val resultEventsBuffer = ListBuffer[AttrEvent]()
-    resultEventsBuffer ++ resultEvents.toList
+    resultEventsBuffer ++= resultEvents ++= counts.map( e => {
+      AttrEvent(e._1._1, -1, e._2.count, null, e._1._2)
+    })
   }
 
-  private def doEvalWithLookAheadEvents(events: ListBuffer[AttrEvent]): ListBuffer[AttrEvent] = {
-    // reverse sort by event ts and type
-    // types are in ordering of SOURCE, AHEAD, TARGET
-    val sorted = events.sortBy(e => (- e.ts, - e.typeOrdering, e.name))
-
-    val resultEvents = mutable.HashSet[AttrEvent]()
-
-    for ((event, idx) <- sorted.zipWithIndex) {
-      event.eventType match {
-        case AttrEvent.TARGET =>
-          resultEvents ++= calculateContrib(
-            event,
-            searchSourceEvents(event, sorted.drop(idx + 1))
-          )
-        case _ =>
-      }
+  private def updateValidSource(event: AttrEvent, target: AttrEvent): Unit = {
+    modelType match {
+      case FIRST =>
+        target.first = event
+        if (target.sourceEvents.isEmpty) target.sourceEvents.push(event)
+      case LAST =>
+        if (target.last == null) target.last = event
+        if (target.sourceEvents.isEmpty) target.sourceEvents.push(event)
+      case _ => target.sourceEvents.push(event)
     }
-
-    val resultEventsBuffer = ListBuffer[AttrEvent]()
-    resultEventsBuffer ++ resultEvents.toSeq
-  }
-
-  private def searchSourceEvents(target: AttrEvent,
-                                 events: ListBuffer[AttrEvent]): mutable.Stack[AttrEvent] = {
-    val result = mutable.Stack[AttrEvent]()
-    val aheadEvents = mutable.Queue[AttrEvent]()
-    for (event <- events) {
-      // quit on out of window
-      if (!withinWindow(event, target)) {
-        return result
-      }
-
-      // search for look-ahead event first
-      // and then looking for the first related source event before the look-ahead event
-      event.eventType match {
-        case AttrEvent.AHEAD if related(target, event) =>
-          aheadEvents.enqueue(event)
-        case AttrEvent.SOURCE if aheadEvents.dequeueFirst(related(_, event)).isDefined =>
-          result.push(event)
-        case _ =>
-      }
-    }
-    result
   }
 
   private def related(event1: AttrEvent, event2: AttrEvent): Boolean = {
     val relation = relations.get(event1.name)
-    if (relation.isEmpty) {
+    if (relation == null || relation.isEmpty) {
       return true
     }
     val pairs = relation.get.get(event2.name)
@@ -339,72 +369,73 @@ case class Attribution(windowLitExpr: Expression,
     true
   }
 
-  private def calculateContrib(target: AttrEvent,
-                               sourceEvents: mutable.Stack[AttrEvent]): ListBuffer[AttrEvent] = {
-    // target event with no source events
-    if (sourceEvents.isEmpty) {
-      return ListBuffer(
-        AttrEvent("d", AttrEvent.SOURCE, 0, Array(), null, 0, Array())
-      )
+  private def calculateContrib(target: AttrEvent): mutable.Stack[AttrEvent] = {
+    if (target.sourceEvents.isEmpty) {
+      val st = mutable.Stack[AttrEvent]()
+      st.push(AttrEvent("d", AttrEvent.SOURCE, 0, Array(), null))
+      return st
     }
-
     modelType match {
       case FIRST =>
-        sourceEvents.top.contrib += 1
-        updateMeasures(target, sourceEvents.top)
+        target.first.contrib += 1
+        updateMeasures(target, target.first)
+        target.sourceEvents.clear()
+        target.sourceEvents.push(target.first)
       case LAST =>
-        sourceEvents.last.contrib += 1
-        updateMeasures(target, sourceEvents.last)
+        target.last.contrib += 1
+        updateMeasures(target, target.last)
       case LINEAR =>
-        val contrib = 1.0 / sourceEvents.size
-        sourceEvents.foreach { e =>
+        val contrib = 1.0 / target.sourceEvents.size
+        target.sourceEvents.foreach { e =>
           e.contrib += contrib
           updateMeasures(target, e)
         }
       case POSITION =>
-        if (sourceEvents.size == 1) {
-          sourceEvents.foreach { e =>
+        if (target.sourceEvents.size == 1) {
+          target.sourceEvents.foreach { e =>
             e.contrib += 1
             updateMeasures(target, e)
           }
-        } else if (sourceEvents.size == 2) {
-          sourceEvents.foreach { e =>
+        } else if (target.sourceEvents.size == 2) {
+          target.sourceEvents.foreach { e =>
             e.contrib += 0.5
             updateMeasures(target, e)
           }
         } else {
-          val remContrib = 0.2 / (sourceEvents.size - 2)
-          sourceEvents.zipWithIndex.foreach {
-            case (e, idx) =>
-              if (idx == 0 || idx == sourceEvents.size - 1) {
+          val remContrib = 0.2 / (target.sourceEvents.size - 2)
+          val first = target.sourceEvents.top
+          val last = target.sourceEvents.last
+          target.sourceEvents.foreach { e => {
+              if (e == first || e == last) {
                 e.contrib += 0.4
               } else {
                 e.contrib += remContrib
               }
               updateMeasures(target, e)
+            }
           }
         }
       case DECAY =>
-        var contrib = 0.5
+        var contrib = 1.0
         val oneWeek = 7 * 24 * 60 * 60 * 1000
-        var windowStart = target.ts - oneWeek // inclusive
-        sourceEvents.reverseIterator.foreach { e =>
-          while (e.ts < windowStart) {
-            windowStart = windowStart - oneWeek
+        var windowEnd = target.ts - oneWeek // first DECAY end time
+        target.sourceEvents.reverseIterator.foreach { e =>
+          while (e.ts < windowEnd) { //  stride across Multiple DECAY
+            windowEnd = windowEnd - oneWeek // next DECAY end time
             contrib *= 0.5
           }
           e.contrib += contrib
           updateMeasures(target, e)
         }
     }
-    val sourceEventsBufferList = ListBuffer[AttrEvent]()
-    sourceEventsBufferList ++ sourceEvents
+    target.sourceEvents
   }
 
   private def updateMeasures(target: AttrEvent, source: AttrEvent): Unit = {
     if (target.measureContrib == null || target.measureContrib.length == 0) {
       return
     }
+    if (source.measureContrib == null) source.measureContrib = Array.fill(measureCount)(0)
     target.measureContrib.zipWithIndex.foreach {
       case (measure, idx) =>
         source.measureContrib(idx) += measure * source.contrib
@@ -419,24 +450,41 @@ case class Attribution(windowLitExpr: Expression,
   private def toResultForm(events: ListBuffer[AttrEvent]): GenericArrayData = {
     new GenericArrayData(
       events.map(e =>
-        if (e.measureContrib == null) {
-          InternalRow(e.utf8Name, e.contrib, null, e.groupingInfos)
-        } else {
-          InternalRow(e.utf8Name, e.contrib,
-            new GenericArrayData(e.measureContrib), e.groupingInfos)
-        }
+          if (e.eventType == -1) { // 返回所有按分组统计待归因事件的数量
+            InternalRow(e.utf8Name, -1.0, null,
+              if (e.groupingInfos == null) null
+              else new GenericArrayData(
+                e.groupingInfos.split("\\|").map(s => UTF8String.fromString(s))
+              ),
+              e.ts)
+          } else {
+            InternalRow(e.utf8Name, e.contrib,
+              if (e.measureContrib == null) null else new GenericArrayData(e.measureContrib),
+              if (e.groupingInfos == null) null
+              else new GenericArrayData(
+                e.groupingInfos.split("\\|").map(s => UTF8String.fromString(s))
+              ),
+              1L
+            )
+          }
       )
     )
   }
 
-  override def dataType: DataType = ArrayType(
-    StructType(Seq(
-      StructField("name", StringType),
-      StructField("contrib", DoubleType),
-      StructField("measureContrib", ArrayType(DoubleType)),
-      StructField("groupingInfos", groupingInfoExpr.dataType)
-    )))
-
+  override def dataType: DataType = {
+    if (dataTypeValue != null) {
+      return dataTypeValue
+    }
+    dataTypeValue = ArrayType(
+      StructType(Seq(
+        StructField("name", StringType),
+        StructField("contrib", DoubleType),
+        StructField("measureContrib", ArrayType(DoubleType)),
+        StructField("groupingInfos", ArrayType(StringType)),
+        StructField("count", LongType)
+      )))
+    dataTypeValue
+  }
   override def serialize(buffer: ListBuffer[AttrEvent]): Array[Byte] = {
     serializerInstance.serialize(buffer).array()
   }
@@ -462,14 +510,19 @@ case class Attribution(windowLitExpr: Expression,
 }
 
 // scalastyle:off
+case class SourceCount(var count: Long)
 case class AttrEvent(name: String,
                      eventType: Int,
                      ts: Long,
-                     relatedDims: Array[Any],
-                     groupingInfos: Any,
-                     var contrib: Double,
-                     var measureContrib: Array[Double]) {
-
+                     relatedDims: Array[String],
+                     groupingInfos: String,
+                     var measureContrib: Array[Double]= null,
+                     var contrib: Double= 0,
+                     var first: AttrEvent= null,
+                     var last: AttrEvent= null,
+                     var sourceEvents: mutable.Stack[AttrEvent]= null,
+                     var aheadEvents: mutable.ListBuffer[AttrEvent]= null
+                    ) {
   def typeOrdering: Int = eventType
 
   lazy val utf8Name: UTF8String = UTF8String.fromString(name)
