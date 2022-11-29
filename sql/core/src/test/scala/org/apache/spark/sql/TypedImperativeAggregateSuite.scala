@@ -526,10 +526,6 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     buildCaseWhen(eid, "t", comma)
   }
 
-  private def buildAhead(eid: Seq[Int], comma: Boolean = true): String = {
-    buildCaseWhen(eid, "a", comma)
-  }
-
   private def buildCaseWhen(eid: Seq[Int], prefix: String, comma: Boolean = true): String = {
     val casewhen = "case " +
       eid.map { i => s"when eid=$i then '$prefix$i'"}.mkString(" ") +
@@ -541,21 +537,106 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     }
   }
 
-  private def buildMap(e1List: Seq[String], e2List: Seq[String],
-                       dim1: String, dim2: String): String = {
-    (for (e1 <- e1List; e2 <- e2List) yield (e1, e2)).map { case (e1, e2) =>
-      s"map('$e1', $dim1, '$e2', $dim2)"
-    }.mkString(",")
+
+  test("single window funnel test") {
   }
-
-
-  private def checkWindowAnswer (df: DataFrame, expected: Seq[(Int, Int)] ): Unit = {
-    df.show (false)
-    checkAnswer (df, expected.toDF () )
-  }
-
   test("test window funnel") {
     // simple
+    {
+      val result = "[1,3,null]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1'),
+            (1, 0, 2, 'a2'),
+            (1, 0, 3, null),
+            (1, 1, 4, 'a4'),
+            (1, 2, 5, 'a5'),
+            (1, 3, 6, 'a6')
+            AS test(user_id,event_id,event_time,dim)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              10,-- window
+              4,
+              'false',
+              event_time,
+              tmp0.dim,
+              case
+              when event_id = 0 then '0'
+              when event_id = 1 then '1'
+              when event_id = 2 then '2'
+              when event_id = 3 then '3'
+              else '-1' end,
+              case
+              when event_id = 0 then null
+              when event_id = 1 then null
+              when event_id = 2 then null
+              else '' end,
+              struct()
+            ) seq
+            from tmp0
+            group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim
+          from tmp1
+          """.stripMargin
+      )
+      //            df.show(false)
+      val actual = df.collect().mkString(";")
+      //            println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,3,a3,a4,a5,a8]"
+      val df = spark.sql(
+        """
+        with tmp0 as (
+          select * from values
+          (1, 0, 1, 'a1'),
+          (1, 1, 2, 'a2'),
+          (1, 0, 3, 'a3'),
+          (1, 1, 4, 'a4'),
+          (1, 2, 5, 'a5'),
+          (1, 1, 6, 'a6'),
+          (1, 2, 7, 'a7'),
+          (1, 3, 8, 'a8')
+          AS test(user_id,event_id,event_time,dim)
+        ),
+        tmp1 as (
+          select user_id, window_funnel(
+            10,-- window
+            4,
+            'false',
+            event_time,
+            tmp0.dim,
+            case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+            else '-1' end,
+            case
+            when event_id = 0 then null
+            when event_id = 1 then null
+            when event_id = 2 then null
+            else '' end,
+            struct(struct(0, dim),struct(1, dim),struct(2, dim),struct(3, dim))
+          ) seq
+          from tmp0
+          group by user_id
+        )
+        select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim,
+        seq['1dim'] 1dim, seq['2dim'] 2dim, seq['3dim'] 3dim
+        from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //            println(actual)
+      assert(result == actual)
+    }
     {
       val result = "[1,3,a6,a7,a8,a9]"
       val df = spark.sql(
@@ -582,7 +663,9 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
             select user_id, window_funnel(
               6,-- window
               4,
+              'false',
               event_time,
+              tmp0.dim,
               case
               when event_id = 0 then '0'
               when event_id = 1 then '1'
@@ -594,49 +677,15 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
               when event_id = 1 then null
               when event_id = 2 then null
               else '' end,
-              struct(struct(0, dim),struct(1, dim),struct(2, dim),struct(3, dim))
+              struct(struct(1, dim),struct(2, dim),struct(3, dim))
             ) seq
             from tmp0
             group by user_id
           )
-          select user_id,seq['max_step'] max_step ,
-          seq['0dim'] 0dim, seq['1dim'] 1dim, seq['2dim'] 2dim, seq['3dim'] 3dim
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim,
+          seq['1dim'] 1dim, seq['2dim'] 2dim, seq['3dim'] 3dim
           from tmp1
           """.stripMargin
-      )
-      //    df.show(false)
-      val actual = df.collect().mkString(";")
-      //    println(actual)
-      assert(result == actual)
-    }
-    // repeat
-    {
-      val result = "[1,2,a4]"
-      val df = spark.sql(
-        """
-          with tmp0 as (
-            select * from values
-            (1, 0, 1, 'a1'),
-          --  (1, 0, 3, 'a3'),
-            (1, 0, 4, 'a4'),
-          --  (1, 0, 5, 'a5'),
-            (1, 0, 8, 'a9'),
-            (1, 0, 9, 'a11')
-            AS test(user_id,event_id,event_time,dim)
-          ),
-          tmp1 as (
-            select user_id, window_funnel(
-              6,
-              3,
-              event_time,
-              case when event_id = 0 then '0,1,2'  else '-1' end,
-              null,
-              struct(struct(0, dim))
-            ) seq
-            from tmp0 group by user_id
-          )
-          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim from tmp1
-        """.stripMargin
       )
 //      df.show(false)
       val actual = df.collect().mkString(";")
@@ -644,49 +693,83 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       assert(result == actual)
     }
 
-    // simple group
+    // repeat
     {
-      val result = "[1,2,a1,b1,b2,null]"
+      val result = "[1,2,a1,a3,a4]"
       val df = spark.sql(
         """
           with tmp0 as (
             select * from values
-            (1, 1, 1, 'a1', 'b1', 1),
-            (1, 0, 1, 'a1', 'b1', 1),
-            (1, 1, 2, 'a2', 'b2', 2),
-            (1, 0, 3, 'a3', 'b3', 3),
-            (1, 0, 4, 'a4',  null, 4),
-            (1, 2, 4, 'a4',  null, null),
-            (1, 1, 5, 'a5', 'b5', 5),
-            (1, 2, 9, 'a6', 'b6', 6),
-            (1, 1, 11, 'a7', 'b7', 7)
-            AS test(user_id, event_id, event_time, dim1, dim2, dim3)
+            (1, 0, 1, 'a1'),
+            (1, 0, 3, 'a3'),
+            (1, 0, 4, 'a4')
+            AS test(user_id,event_id,event_time,dim)
           ),
           tmp1 as (
             select user_id, window_funnel(
               6,
               3,
+              'true',
               event_time,
-              case
-              when event_id = 0 then '0'
-              when event_id = 1 then '1'
-              when event_id = 2 then '2'
-              else '-1' end,
+              tmp0.dim,
+              case when event_id = 0 then '0,1,2'  else '-1' end,
               null,
-              struct(struct(0, dim1),struct(0, dim2),struct(1, dim2),struct(2, dim3))
+              struct(struct(0, dim),struct(1, dim),struct(2, dim))
             ) seq
             from tmp0 group by user_id
           )
-          select user_id,seq['max_step'] max_step ,
-          seq['0dim1'] 0dim1 ,seq['0dim2'] 0dim2 ,seq['1dim2'] 1dim2 ,seq['2dim3'] 2dim3
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim ,
+          seq['1dim'] 1dim ,seq['2dim'] 2dim
           from tmp1
         """.stripMargin
       )
-//      df.show(false)
+      //      df.show(false)
       val actual = df.collect().mkString(";")
-//      println(actual)
+      //      println(actual)
       assert(result == actual)
     }
+    {
+      val result = "[1,2,a5,a8,a9]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1'),
+          --  (1, 1, 3, 'a3'),
+            (1, 0, 4, 'a4'),
+            (1, 0, 5, 'a5'),
+            (1, 1, 8, 'a8'),
+            (1, 0, 9, 'a9')
+            AS test(user_id,event_id,event_time,dim)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'true',
+              event_time,
+              tmp0.dim,
+              case
+                when event_id = 0 then '0,2'
+                when event_id = 1 then '1'
+              else '-1' end,
+              null,
+              struct(struct(0, dim),struct(1, dim),struct(2, dim))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim ,
+          seq['1dim'] 1dim ,seq['2dim'] 2dim
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+
+
   }
   test("test compress bitmap build") {
     val colNames = Seq("user_id", "event_id", "event_time", "dim")
