@@ -32,18 +32,22 @@ import org.apache.spark.unsafe.types.UTF8String
 
 /**
  * @param windowLit window size in long
- * @param evtNumExpr number of events
- * @param eventTsCol event ts in long
+ * @param evtNumLit number of events
+ * @param repeatLit is repeat events
+ * @param eventTsExpr event ts in long
+ * @param baseGroupExpr start event base group
  * @param evtConds expr to return event id (starting from 0)
  * @param eventRelations expr to return related dim values
- * @param groupingInfoExpr expr to return stepId attach props array
+ * @param groupExpr expr to return stepId attach props array
  */
 case class WindowFunnel(windowLit: Expression,
-                        evtNumExpr: Expression,
-                        eventTsCol: Expression,
+                        evtNumLit: Expression,
+                        repeatLit: Expression,
+                        eventTsExpr: Expression,
+                        baseGroupExpr: Expression,
                         evtConds: Expression,
                         eventRelations: Expression,
-                        groupingInfoExpr: Expression,
+                        groupExpr: Expression,
                         mutableAggBufferOffset: Int = 0,
                         inputAggBufferOffset: Int = 0)
   extends TypedImperativeAggregate[ListBuffer[Event]]
@@ -51,18 +55,22 @@ case class WindowFunnel(windowLit: Expression,
     with SerializerSupport {
 
   def this(windowLit: Expression,
-           evtNumExpr: Expression,
-           eventTsCol: Expression,
+           evtNumLit: Expression,
+           repeatLit: Expression,
+           eventTsExpr: Expression,
+           baseGroupExpr: Expression,
            evtConds: Expression,
            eventRelations: Expression,
-           groupingInfoExpr: Expression) = {
-    this(windowLit, evtNumExpr, eventTsCol, evtConds,
-      eventRelations, groupingInfoExpr, 0, 0)
+           groupExpr: Expression) = {
+    this(windowLit, evtNumLit, repeatLit, eventTsExpr, baseGroupExpr, evtConds,
+      eventRelations, groupExpr, 0, 0)
   }
 
   val kryo: Boolean = true
+  lazy val repeat: Boolean = repeatLit.eval().toString.toBoolean
   lazy val window: Long = windowLit.eval().toString.toLong
-  lazy val evtNum: Int = evtNumExpr.eval().toString.toInt
+  lazy val evtNum: Int = evtNumLit.eval().toString.toInt
+  lazy val baseGroupName: String = "0" + baseGroupExpr.toString.split("#")(0)
   var dataTypeValue: DataType = null
   var groupDimNames: Seq[String] = null
   override def createAggregationBuffer(): ListBuffer[Event] = ListBuffer[Event]()
@@ -72,9 +80,17 @@ case class WindowFunnel(windowLit: Expression,
       case _: NullType =>
         Array(-1)
       case _ =>
-        // timezone doesn't really matter here
         val arr = expr.eval(input).toString.split(",").map(_.trim.toInt)
         arr
+    }
+  }
+
+  def toInteger(expr: Expression, input: InternalRow): Int = {
+    expr.dataType match {
+      case _: NullType =>
+        -1
+      case _ =>
+        expr.eval(input).toString.toInt
     }
   }
 
@@ -115,34 +131,55 @@ case class WindowFunnel(windowLit: Expression,
   }
 
   def toGroupNames(): Unit = {
-    groupDimNames = groupingInfoExpr.children.filter(e => e.isInstanceOf[CreateNamedStruct])
+    groupDimNames = groupExpr.children.filter(e => e.isInstanceOf[CreateNamedStruct])
       .map(e => {
         val split = e.toString.split(",")
         split.apply(1).trim + split.apply(2).trim
-      })
+      }).filter(!_.equals(baseGroupName))
   }
 
   override def update(buffer: ListBuffer[Event], input: InternalRow): ListBuffer[Event] = {
-    val eids = toIntegerArray(evtConds, input)
-    val ts = toLong(eventTsCol, input)
-    if (ts < 0 || eids.apply(0) < 0 ) {
-      return buffer
-    }
-    val stepDimValues: GenericInternalRow = toGroups(groupingInfoExpr, input)
-    if ( groupDimNames == null) toGroupNames()
 
-    val groupDim = mutable.HashMap [String, String]()
-    for (i <- 0 until groupDimNames.length) {
-      val dimName = groupDimNames.apply(i)
-      val dimValues = stepDimValues.get(i, ArrayType(StringType)).asInstanceOf[GenericInternalRow]
-      val step = dimValues.get(0, StringType).toString.toInt
-      val dimValue = dimValues.get(1, StringType)
-      val dimValueStr = if (dimValue == null) "null" else dimValue.toString
-      if(eids.contains(step)) {
-        groupDim.put(dimName, dimValueStr)
+    val ts = toLong(eventTsExpr, input)
+    if(ts < 0) return buffer
+
+    var eids: Array[Int] = null
+    var eid: Int = -1
+    var baseGroup: String = null
+    if(repeat) {
+      eids = toIntegerArray(evtConds, input)
+      if (eids.apply(0) < 0 ) return buffer
+      if(eids.contains(0)) baseGroup = toString(baseGroupExpr, input)
+    } else {
+      eid = toInteger(evtConds, input)
+      if(eid < 0) return buffer
+      if(eid == 0) {
+        baseGroup = toString(baseGroupExpr, input)
+//        if (baseGroup == null) return buffer
+        if (baseGroup == null) baseGroup = "null"
       }
     }
-    val event = Event(ts, eids, groupDim)
+
+    var groupDim: mutable.HashMap [String, String] = null
+    if(groupDimNames == null) toGroupNames()
+    if(groupDimNames.nonEmpty) {
+      groupDim = mutable.HashMap [String, String]()
+      val stepDimValues: GenericInternalRow = toGroups(groupExpr, input)
+      for (i <- groupDimNames.indices) {
+        val dimName = groupDimNames.apply(i)
+        val dimValues = stepDimValues.get(i, ArrayType(StringType)).asInstanceOf[GenericInternalRow]
+        val step = dimValues.get(0, StringType).toString.toInt
+        val dimValue = dimValues.get(1, StringType)
+        val dimValueStr = if (dimValue == null) "null" else dimValue.toString
+        if (repeat) {
+          if (eids.contains(step)) groupDim.put(dimName, dimValueStr)
+        } else {
+          if (eid == step) groupDim.put(dimName, dimValueStr)
+        }
+      }
+    }
+
+    val event = Event(ts, eid, eids, baseGroup, groupDim)
     buffer.append(event)
     buffer
   }
@@ -155,12 +192,13 @@ case class WindowFunnel(windowLit: Expression,
 
   override def eval(buffer: ListBuffer[Event]): Any = {
     if (groupDimNames == null) toGroupNames()
-    val returnRow = new GenericInternalRow(1 + groupDimNames.size )
-    if (buffer.length == 0) {
+    val returnRow = new GenericInternalRow(2 + groupDimNames.size )
+    if (buffer.isEmpty) {
       returnRow(0) = -1
       return returnRow
     }
-    val maxStepEvent = doEval(buffer)
+    val sorted = buffer.sortBy(_.ts)
+    val maxStepEvent = if (repeat) doRepeatEval(sorted) else doSimpleEval(sorted)
 
     if (maxStepEvent == null) {
       returnRow(0) = -1
@@ -168,25 +206,27 @@ case class WindowFunnel(windowLit: Expression,
     }
 
     returnRow(0) = maxStepEvent.maxStep
+    returnRow(1) = UTF8String.fromString(maxStepEvent.baseGroup)
 
-    var i = 1
+    var i = 2
     for (name <- groupDimNames) {
-      returnRow(i) = UTF8String.fromString(maxStepEvent.resultGroupDim.get(name).get)
+      returnRow(i) = UTF8String.fromString(maxStepEvent.resultGroupDim(name))
       i+=1
     }
     returnRow
   }
-  def doEval(buffer: ListBuffer[Event]): Event = {
-    val sorted = buffer.sortBy(_.ts)
+  def doSimpleEval(sorted: ListBuffer[Event]): Event = {
     var currentMaxStepEvent: Event = null
     val startEvents: ListBuffer[Event] = ListBuffer[Event]()
     breakable {
       for (event <- sorted) {
-        if (event.eids.contains(0)) {
-          event.resultGroupDim = mutable.HashMap[String, String]()
-          for ((x, y) <- event.groupDim) {
-            if (x.startsWith("0")) {
-              event.resultGroupDim.put(x, y)
+        if (event.eid == 0) {
+          if (event.groupDim != null) {
+            event.resultGroupDim = mutable.HashMap[String, String]()
+            for ((x, y) <- event.groupDim) {
+              if (x.startsWith("0")) {
+                event.resultGroupDim.put(x, y)
+              }
             }
           }
           if (currentMaxStepEvent == null) {
@@ -195,7 +235,70 @@ case class WindowFunnel(windowLit: Expression,
           startEvents.append(event)
         }
         breakable {
-          for (i <- (0 until startEvents.size).reverse) {
+          for (i <- startEvents.indices.reverse) {
+            val startEvent = startEvents.apply(i)
+            if (event != startEvent) {
+              // 超出窗口期 或者 超出当前最大步骤时间
+              if ((event.ts - startEvent.ts) > window || startEvent.ts < currentMaxStepEvent.ts) {
+                break()
+              }
+              val nextMaxStep = startEvent.maxStep + 1
+              var goAhead: Boolean = false
+              if (event.eid > nextMaxStep) {
+                // 大于下一步骤 可以继续向上计算
+                goAhead = true
+              }
+              if (event.eid == nextMaxStep) {
+                // 等于下一步 添加下一步的分组
+                if (event.groupDim != null) {
+                  val nextStepString = nextMaxStep.toString
+                  for ((x, y) <- event.groupDim) {
+                    if (x.startsWith(nextStepString)) {
+                      startEvent.resultGroupDim.put(x, y)
+                    }
+                  }
+                }
+                startEvent.maxStep = nextMaxStep
+                if (nextMaxStep >= currentMaxStepEvent.maxStep) { // >= 寻找最靠近目标事件的
+                  currentMaxStepEvent = startEvent
+                }
+              }
+
+              if (!goAhead) { // 没有大于下一步骤 不需要在向上计算
+                break()
+              }
+            }
+          }
+        }
+        if (currentMaxStepEvent != null && (currentMaxStepEvent.maxStep + 1) == evtNum) {
+          break()
+        }
+      }
+    }
+    currentMaxStepEvent
+  }
+
+  def doRepeatEval(sorted: ListBuffer[Event]): Event = {
+    var currentMaxStepEvent: Event = null
+    val startEvents: ListBuffer[Event] = ListBuffer[Event]()
+    breakable {
+      for (event <- sorted) {
+        if (event.eids.contains(0)) {
+          if (event.groupDim != null) {
+            event.resultGroupDim = mutable.HashMap[String, String]()
+            for ((x, y) <- event.groupDim) {
+              if (x.startsWith("0")) {
+                event.resultGroupDim.put(x, y)
+              }
+            }
+          }
+          if (currentMaxStepEvent == null) {
+            currentMaxStepEvent = event
+          }
+          startEvents.append(event)
+        }
+        breakable {
+          for (i <- startEvents.indices.reverse) {
             val startEvent = startEvents.apply(i)
             if (event != startEvent) {
               // 超出窗口期 或者 超出当前最大步骤时间
@@ -209,14 +312,16 @@ case class WindowFunnel(windowLit: Expression,
                 if (eid > nextMaxStep ) goAhead = true
                 if (eid == nextMaxStep) { // 等于下一步
                   // 添加下一步的分组
-                  val nextStepString = nextMaxStep.toString
-                  for ((x, y) <- event.groupDim) {
-                    if (x.startsWith(nextStepString)) {
-                      startEvent.resultGroupDim.put(x, y)
+                  if (event.groupDim != null) {
+                    val nextStepString = nextMaxStep.toString
+                    for ((x, y) <- event.groupDim) {
+                      if (x.startsWith(nextStepString)) {
+                        startEvent.resultGroupDim.put(x, y)
+                      }
                     }
                   }
                   startEvent.maxStep = nextMaxStep
-                  if (nextMaxStep > currentMaxStepEvent.maxStep) { // 不能 >= ，要记录首次达到的最大值
+                  if (nextMaxStep > currentMaxStepEvent.maxStep) { // 不能 >= ，重复事件会有遗漏
                     currentMaxStepEvent = startEvent
                   }
                 }
@@ -274,12 +379,12 @@ case class WindowFunnel(windowLit: Expression,
 //    println("DataType--------------------"+ dt)
     val max_step_id = "{\"name\":\"max_step\",\"type\":\"integer\"," +
       "\"nullable\":false,\"metadata\":{}}"
-//    val start_time = "{\"name\":\"start_time\",\"type\":\"long\"," +
-//      "\"nullable\":false,\"metadata\":{}}"
-    val  sb = new StringBuilder()
+    val base_group_name = "{\"name\":\"" + baseGroupName + "\",\"type\":\"string\"," +
+      "\"nullable\":false,\"metadata\":{}}"
+    val sb = new StringBuilder()
     sb.append("{\"type\":\"struct\",\"fields\":[")
       .append(max_step_id).append(",")
-//      .append(start_time).append(",")
+      .append(base_group_name).append(",")
 
     if(groupDimNames == null ) toGroupNames()
     for(name <- groupDimNames) {
@@ -293,15 +398,18 @@ case class WindowFunnel(windowLit: Expression,
     dataTypeValue
   }
   override def children: Seq[Expression] =
-    windowLit :: eventTsCol :: evtNumExpr :: evtConds :: eventRelations :: groupingInfoExpr :: Nil
+    windowLit :: evtNumLit :: repeatLit :: eventTsExpr :: baseGroupExpr ::
+      evtConds :: eventRelations :: groupExpr :: Nil
 }
 
 // scalastyle:off
 case class Event(ts: Long,
-                 eids: Array[Int],
-                 groupDim: mutable.HashMap [String, String],
+                 var eid: Int = -1,
+                 var eids: Array[Int],
+                 var baseGroup: String,
+                 var groupDim: mutable.HashMap [String, String],
                  var maxStep: Int = 0,
-                 var resultGroupDim: mutable.HashMap [String, String] =null
+                 var resultGroupDim: mutable.HashMap [String, String] = null
                  ) {
   def typeOrdering: Long = ts
 
