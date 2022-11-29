@@ -238,18 +238,15 @@ case class WindowFunnel(windowLit: Expression,
           for (i <- startEvents.indices.reverse) {
             val startEvent = startEvents.apply(i)
             if (event != startEvent) {
-              // 超出窗口期 或者 超出当前最大步骤时间
+              // The window period is exceeded or the current max step time is exceeded
               if ((event.ts - startEvent.ts) > window || startEvent.ts < currentMaxStepEvent.ts) {
                 break()
               }
               val nextMaxStep = startEvent.maxStep + 1
-              var goAhead: Boolean = false
-              if (event.eid > nextMaxStep) {
-                // 大于下一步骤 可以继续向上计算
-                goAhead = true
-              }
+              var upward: Boolean = false
+              // greater than the next max step, it can be calculated upward
+              if (event.eid > nextMaxStep) upward = true
               if (event.eid == nextMaxStep) {
-                // 等于下一步 添加下一步的分组
                 if (event.groupDim != null) {
                   val nextStepString = nextMaxStep.toString
                   for ((x, y) <- event.groupDim) {
@@ -259,12 +256,14 @@ case class WindowFunnel(windowLit: Expression,
                   }
                 }
                 startEvent.maxStep = nextMaxStep
-                if (nextMaxStep >= currentMaxStepEvent.maxStep) { // >= 寻找最靠近目标事件的
+                if (nextMaxStep >= currentMaxStepEvent.maxStep) {
+                  // >= Find the closest to the target event
                   currentMaxStepEvent = startEvent
                 }
               }
 
-              if (!goAhead) { // 没有大于下一步骤 不需要在向上计算
+              if (!upward) {
+                // No greater than the next max step, no upward calculation is required
                 break()
               }
             }
@@ -301,17 +300,14 @@ case class WindowFunnel(windowLit: Expression,
           for (i <- startEvents.indices.reverse) {
             val startEvent = startEvents.apply(i)
             if (event != startEvent) {
-              // 超出窗口期 或者 超出当前最大步骤时间
               if ((event.ts - startEvent.ts) > window  || startEvent.ts < currentMaxStepEvent.ts ) {
                 break()
               }
               val nextMaxStep = startEvent.maxStep + 1
               var goAhead: Boolean = false
               for(eid <- event.eids) {
-                // 大于下一步骤 可以继续向上计算
                 if (eid > nextMaxStep ) goAhead = true
-                if (eid == nextMaxStep) { // 等于下一步
-                  // 添加下一步的分组
+                if (eid == nextMaxStep) {
                   if (event.groupDim != null) {
                     val nextStepString = nextMaxStep.toString
                     for ((x, y) <- event.groupDim) {
@@ -321,12 +317,13 @@ case class WindowFunnel(windowLit: Expression,
                     }
                   }
                   startEvent.maxStep = nextMaxStep
-                  if (nextMaxStep > currentMaxStepEvent.maxStep) { // 不能 >= ，重复事件会有遗漏
+                  if (nextMaxStep > currentMaxStepEvent.maxStep) {
+                    // no >= , Repeated events may be missed
                     currentMaxStepEvent = startEvent
                   }
                 }
               }
-              if (!goAhead) { // 没有大于下一步骤 不需要在向上计算
+              if (!goAhead) {
                 break()
               }
             }
@@ -376,7 +373,6 @@ case class WindowFunnel(windowLit: Expression,
     if (dataTypeValue != null) {
       return dataTypeValue
     }
-//    println("DataType--------------------"+ dt)
     val max_step_id = "{\"name\":\"max_step\",\"type\":\"integer\"," +
       "\"nullable\":false,\"metadata\":{}}"
     val base_group_name = "{\"name\":\"" + baseGroupName + "\",\"type\":\"string\"," +
