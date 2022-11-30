@@ -340,10 +340,12 @@ case class Attribution(windowLitExpr: Expression,
   private def updateValidSource(event: AttrEvent, target: AttrEvent): Unit = {
     modelType match {
       case FIRST =>
-        target.first = event
+        target.first = event // only update first
+        // when sourceEvents is empty will be judged as direct conversion
+        // only push once
         if (target.sourceEvents.isEmpty) target.sourceEvents.push(event)
       case LAST =>
-        if (target.last == null) target.last = event
+        if (target.last == null) target.last = event // only update last
         if (target.sourceEvents.isEmpty) target.sourceEvents.push(event)
       case _ => target.sourceEvents.push(event)
     }
@@ -379,6 +381,7 @@ case class Attribution(windowLitExpr: Expression,
       case FIRST =>
         target.first.contrib += 1
         updateMeasures(target, target.first)
+        // set right first before return sourceEvents
         target.sourceEvents.clear()
         target.sourceEvents.push(target.first)
       case LAST =>
