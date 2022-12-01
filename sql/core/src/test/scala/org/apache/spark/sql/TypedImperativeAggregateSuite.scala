@@ -539,6 +539,54 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
 
 
   test("single window funnel test") {
+    {
+      val result = "[1,3,3,4,5,6]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, '1', '1', '1', '1'),
+            (1, 0, 2, '2', '2', '2', '2'),
+            (1, 0, 3, '3', '3', '3', '3'),
+            (1, 1, 4, '3', '4', '4', '4'),
+            (1, 2, 5, '5', '4', '5', '5'),
+            (1, 3, 6, '6', '6', '5', '6')
+            AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              10,-- window
+              4,
+              'SIMPLE_REL',
+              event_time,
+              tmp0.dim4,
+              case
+                when event_id = 0 then '0'
+                when event_id = 1 then '1'
+                when event_id = 2 then '2'
+                when event_id = 3 then '3'
+              else '-1' end,
+              struct(
+                struct('NONE',dim1),
+                struct(dim1,dim2),
+                struct(dim2,dim3),
+                struct(dim3,'NONE')
+              ),
+              struct(struct(1, dim4),struct(2, dim4),struct(3, dim4))
+            ) seq
+            from tmp0
+            group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+          seq['1dim4'] 1dim4, seq['2dim4'] 2dim4, seq['3dim4'] 3dim4
+          from tmp1
+          """.stripMargin
+      )
+      df.show(false)
+      val actual = df.collect().mkString(";")
+      println(actual)
+      assert(result == actual)
+    }
   }
   test("test window funnel") {
     // simple
@@ -560,7 +608,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
             select user_id, window_funnel(
               10,-- window
               4,
-              'false',
+              'SIMPLE',
               event_time,
               tmp0.dim,
               case
@@ -608,7 +656,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
           select user_id, window_funnel(
             10,-- window
             4,
-            'false',
+            'SIMPLE',
             event_time,
             tmp0.dim,
             case
@@ -663,7 +711,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
             select user_id, window_funnel(
               6,-- window
               4,
-              'false',
+              'SIMPLE',
               event_time,
               tmp0.dim,
               case
@@ -709,7 +757,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
             select user_id, window_funnel(
               6,
               3,
-              'true',
+              'REPEAT',
               event_time,
               tmp0.dim,
               case when event_id = 0 then '0,1,2'  else '-1' end,
@@ -746,7 +794,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
             select user_id, window_funnel(
               6,
               3,
-              'true',
+              'REPEAT',
               event_time,
               tmp0.dim,
               case

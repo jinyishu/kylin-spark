@@ -33,7 +33,7 @@ import org.apache.spark.unsafe.types.UTF8String
 /**
  * @param windowLit window size in long
  * @param evtNumLit number of events
- * @param repeatLit is repeat events
+ * @param modelTypeLit WindowFunnel type ,SIMPLE,SIMPLE_REL,REPEAT,REPEAT_REL
  * @param eventTsExpr event ts in long
  * @param baseGroupExpr start event base group
  * @param evtConds expr to return event id (starting from 0)
@@ -42,7 +42,7 @@ import org.apache.spark.unsafe.types.UTF8String
  */
 case class WindowFunnel(windowLit: Expression,
                         evtNumLit: Expression,
-                        repeatLit: Expression,
+                        modelTypeLit: Expression,
                         eventTsExpr: Expression,
                         baseGroupExpr: Expression,
                         evtConds: Expression,
@@ -50,30 +50,39 @@ case class WindowFunnel(windowLit: Expression,
                         groupExpr: Expression,
                         mutableAggBufferOffset: Int = 0,
                         inputAggBufferOffset: Int = 0)
-  extends TypedImperativeAggregate[ListBuffer[Event]]
+  extends TypedImperativeAggregate[ListBuffer[FunnelEvent]]
     with Serializable with Logging
     with SerializerSupport {
 
   def this(windowLit: Expression,
            evtNumLit: Expression,
-           repeatLit: Expression,
+           modelTypeLit: Expression,
            eventTsExpr: Expression,
            baseGroupExpr: Expression,
            evtConds: Expression,
            eventRelations: Expression,
            groupExpr: Expression) = {
-    this(windowLit, evtNumLit, repeatLit, eventTsExpr, baseGroupExpr, evtConds,
+    this(windowLit, evtNumLit, modelTypeLit, eventTsExpr, baseGroupExpr, evtConds,
       eventRelations, groupExpr, 0, 0)
   }
 
   val kryo: Boolean = true
-  lazy val repeat: Boolean = repeatLit.eval().toString.toBoolean
   lazy val window: Long = windowLit.eval().toString.toLong
   lazy val evtNum: Int = evtNumLit.eval().toString.toInt
   lazy val baseGroupName: String = "0" + baseGroupExpr.toString.split("#")(0)
+
+  val SIMPLE = "SIMPLE"
+  val REPEAT = "REPEAT"
+  val SIMPLE_REL = "SIMPLE_REL"
+  val REPEAT_REL = "REPEAT_REL"
+  lazy val modelType: String = modelTypeLit.eval().toString
+  lazy val isRepeat: Boolean = modelType.contains(REPEAT)
+  lazy val isRelations: Boolean = modelType.contains("REL")
+
+
   var dataTypeValue: DataType = null
   var groupDimNames: Seq[String] = null
-  override def createAggregationBuffer(): ListBuffer[Event] = ListBuffer[Event]()
+  override def createAggregationBuffer(): ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
 
   def toIntegerArray(expr: Expression, input: InternalRow): Array[Int] = {
     expr.dataType match {
@@ -138,7 +147,8 @@ case class WindowFunnel(windowLit: Expression,
       }).filter(!_.equals(baseGroupName))
   }
 
-  override def update(buffer: ListBuffer[Event], input: InternalRow): ListBuffer[Event] = {
+  override def update(buffer: ListBuffer[FunnelEvent],
+                      input: InternalRow): ListBuffer[FunnelEvent] = {
 
     val ts = toLong(eventTsExpr, input)
     if(ts < 0) return buffer
@@ -146,7 +156,14 @@ case class WindowFunnel(windowLit: Expression,
     var eids: Array[Int] = null
     var eid: Int = -1
     var baseGroup: String = null
-    if(repeat) {
+    var upRelations: String = null
+    var downRelations: String = null
+    var relations: GenericInternalRow = null
+    if (isRelations) {
+      relations = eventRelations.eval(input).asInstanceOf[GenericInternalRow]
+    }
+
+    if(isRepeat) {
       eids = toIntegerArray(evtConds, input)
       if (eids.apply(0) < 0 ) return buffer
       if(eids.contains(0)) baseGroup = toString(baseGroupExpr, input)
@@ -155,8 +172,11 @@ case class WindowFunnel(windowLit: Expression,
       if(eid < 0) return buffer
       if(eid == 0) {
         baseGroup = toString(baseGroupExpr, input)
-//        if (baseGroup == null) return buffer
         if (baseGroup == null) baseGroup = "null"
+      }
+      if (isRelations) {
+        upRelations = relations.values(eid).asInstanceOf[GenericInternalRow].values(0).toString
+        downRelations = relations.values(eid).asInstanceOf[GenericInternalRow].values(1).toString
       }
     }
 
@@ -171,7 +191,7 @@ case class WindowFunnel(windowLit: Expression,
         val step = dimValues.get(0, StringType).toString.toInt
         val dimValue = dimValues.get(1, StringType)
         val dimValueStr = if (dimValue == null) "null" else dimValue.toString
-        if (repeat) {
+        if (isRepeat) {
           if (eids.contains(step)) groupDim.put(dimName, dimValueStr)
         } else {
           if (eid == step) groupDim.put(dimName, dimValueStr)
@@ -179,18 +199,18 @@ case class WindowFunnel(windowLit: Expression,
       }
     }
 
-    val event = Event(ts, eid, eids, baseGroup, groupDim)
+    val event = FunnelEvent(ts, eid, eids, baseGroup, groupDim, upRelations, downRelations)
     buffer.append(event)
     buffer
   }
 
-  override def merge(buffer: ListBuffer[Event],
-                     input: ListBuffer[Event]): ListBuffer[Event] = {
+  override def merge(buffer: ListBuffer[FunnelEvent],
+                     input: ListBuffer[FunnelEvent]): ListBuffer[FunnelEvent] = {
     buffer ++= input
   }
 
 
-  override def eval(buffer: ListBuffer[Event]): Any = {
+  override def eval(buffer: ListBuffer[FunnelEvent]): Any = {
     if (groupDimNames == null) toGroupNames()
     val returnRow = new GenericInternalRow(2 + groupDimNames.size )
     if (buffer.isEmpty) {
@@ -198,8 +218,13 @@ case class WindowFunnel(windowLit: Expression,
       return returnRow
     }
     val sorted = buffer.sortBy(_.ts)
-    val maxStepEvent = if (repeat) doRepeatEval(sorted) else doSimpleEval(sorted)
-
+    val maxStepEvent = modelType match {
+      case SIMPLE => doSimpleEval(sorted)
+      case SIMPLE_REL => doSimpleRelations(sorted)
+      case REPEAT => doRepeatEval(sorted)
+      case REPEAT_REL => null
+      case _ => null
+    }
     if (maxStepEvent == null) {
       returnRow(0) = -1
       return returnRow
@@ -210,24 +235,126 @@ case class WindowFunnel(windowLit: Expression,
 
     var i = 2
     for (name <- groupDimNames) {
-      returnRow(i) = UTF8String.fromString(maxStepEvent.resultGroupDim(name))
+      val value = maxStepEvent.resultGroupDim.getOrElse(name, "null")
+      returnRow(i) = UTF8String.fromString(value)
       i+=1
     }
     returnRow
   }
-  def doSimpleEval(sorted: ListBuffer[Event]): Event = {
-    var currentMaxStepEvent: Event = null
-    val startEvents: ListBuffer[Event] = ListBuffer[Event]()
+
+  def calculateFunnel(currentMaxStepEvent: FunnelEvent): FunnelEvent = {
+    // Get the lowest and earliest event in the largest step collection
+    var maxStepEvent = currentMaxStepEvent.relationsMapArray(currentMaxStepEvent.maxStep).sortBy(_.ts).apply(0)
+    // Set maxStepEvent grouping information
+    val maxStepEventId = currentMaxStepEvent.maxStep.toString
+    for ((x, y) <- maxStepEvent.groupDim) {
+      if (x.startsWith(maxStepEventId)) {
+        currentMaxStepEvent.resultGroupDim.put(x, y)
+      }
+    }
+    // Find the matching path from the largest step up
+    for(i <- (1 until currentMaxStepEvent.maxStep).reverse) {
+      val tmp = currentMaxStepEvent.relationsMapArray(i)
+        // filter matched relations events
+        .filter(_.downRelations.equals(maxStepEvent.upRelations))
+        .sortBy(-_.ts) // Desc by time
+      breakable {
+        for (event <- tmp) {
+          // Get the event whose first time is less than the next step
+          if (event.ts < maxStepEvent.ts) {
+            for ((x, y) <- event.groupDim) {
+              // i.toString： Grouping dimension of current step id
+              if (x.startsWith(i.toString)) {
+                currentMaxStepEvent.resultGroupDim.put(x, y)
+              }
+            }
+            maxStepEvent = event
+            break()
+          }
+        }
+      }
+    }
+    currentMaxStepEvent
+  }
+
+  def doSimpleRelations(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
+    var currentMaxStepEvent: FunnelEvent = null
+    val startEvents = ListBuffer[FunnelEvent]()
+    for (event <- sorted) {
+      if (event.eid == 0) {
+        event.relationsMapArray = mutable.HashMap[Int, ListBuffer[FunnelEvent]]()
+        startEvents.append(event)
+        if (event.groupDim != null) {
+          event.resultGroupDim = mutable.HashMap[String, String]()
+        }
+        if (currentMaxStepEvent == null) {
+          currentMaxStepEvent = event
+        }
+      } else {
+        breakable { // only when exceed window , break
+          // Each event must match all starting events
+          // Subsequent events of each event may associate the attributes of all steps
+          for (i <- startEvents.indices.reverse) {
+            val startEvent = startEvents.apply(i)
+            // The window period is exceeded or the current max step time is exceeded
+            if ((event.ts - startEvent.ts) > window) {
+              break()
+            }
+            // get up step id
+            val upStepId = event.eid - 1
+            if (upStepId == 0 ) {
+              if (startEvent.downRelations.equals(event.upRelations)) {
+                startEvent.relationsMapArray.getOrElseUpdate(event.eid, ListBuffer())
+                  .append(event)
+                // update max step id
+                if (event.eid > startEvent.maxStep) startEvent.maxStep = event.eid
+                // update max step event
+                if (startEvent.maxStep > currentMaxStepEvent.maxStep) {
+                  currentMaxStepEvent = startEvent
+                }
+                if (startEvent.maxStep + 1 == evtNum) return calculateFunnel(currentMaxStepEvent)
+              }
+            } else {
+              // get all up step id events
+              val upStepArray: ListBuffer[FunnelEvent] = startEvent.relationsMapArray.getOrElse(upStepId, null)
+              if (upStepArray != null) {
+                breakable {
+                  for (upStep <- upStepArray) {
+                    // The associated attribute is matched successfully.
+                    // Save the event to the next collection
+                    if (upStep.downRelations.equals(event.upRelations)) {
+                      startEvent.relationsMapArray.getOrElseUpdate(event.eid, ListBuffer())
+                        .append(event)
+                      // update max step id
+                      if (event.eid > startEvent.maxStep) startEvent.maxStep = event.eid
+                      // update max step event
+                      if (startEvent.maxStep > currentMaxStepEvent.maxStep) {
+                        currentMaxStepEvent = startEvent
+                      }
+                      if (startEvent.maxStep + 1 == evtNum) {
+                        return calculateFunnel(currentMaxStepEvent)
+                      }
+                      break()
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    calculateFunnel(currentMaxStepEvent)
+  }
+
+  def doSimpleEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
+    var currentMaxStepEvent: FunnelEvent = null
+    val startEvents: ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
     breakable {
       for (event <- sorted) {
         if (event.eid == 0) {
           if (event.groupDim != null) {
             event.resultGroupDim = mutable.HashMap[String, String]()
-            for ((x, y) <- event.groupDim) {
-              if (x.startsWith("0")) {
-                event.resultGroupDim.put(x, y)
-              }
-            }
           }
           if (currentMaxStepEvent == null) {
             currentMaxStepEvent = event
@@ -277,19 +404,14 @@ case class WindowFunnel(windowLit: Expression,
     currentMaxStepEvent
   }
 
-  def doRepeatEval(sorted: ListBuffer[Event]): Event = {
-    var currentMaxStepEvent: Event = null
-    val startEvents: ListBuffer[Event] = ListBuffer[Event]()
+  def doRepeatEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
+    var currentMaxStepEvent: FunnelEvent = null
+    val startEvents: ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
     breakable {
       for (event <- sorted) {
         if (event.eids.contains(0)) {
           if (event.groupDim != null) {
             event.resultGroupDim = mutable.HashMap[String, String]()
-            for ((x, y) <- event.groupDim) {
-              if (x.startsWith("0")) {
-                event.resultGroupDim.put(x, y)
-              }
-            }
           }
           if (currentMaxStepEvent == null) {
             currentMaxStepEvent = event
@@ -337,11 +459,11 @@ case class WindowFunnel(windowLit: Expression,
     currentMaxStepEvent
   }
 
-  override def serialize(buffer: ListBuffer[Event]): Array[Byte] = {
+  override def serialize(buffer: ListBuffer[FunnelEvent]): Array[Byte] = {
     serializerInstance.serialize(buffer).array()
   }
 
-  override def deserialize(storageFormat: Array[Byte]): ListBuffer[Event] = {
+  override def deserialize(storageFormat: Array[Byte]): ListBuffer[FunnelEvent] = {
     serializerInstance.deserialize(ByteBuffer.wrap(storageFormat))
   }
 
@@ -394,18 +516,21 @@ case class WindowFunnel(windowLit: Expression,
     dataTypeValue
   }
   override def children: Seq[Expression] =
-    windowLit :: evtNumLit :: repeatLit :: eventTsExpr :: baseGroupExpr ::
+    windowLit :: evtNumLit :: modelTypeLit :: eventTsExpr :: baseGroupExpr ::
       evtConds :: eventRelations :: groupExpr :: Nil
 }
 
 // scalastyle:off
-case class Event(ts: Long,
+case class FunnelEvent(ts: Long,
                  var eid: Int = -1,
                  var eids: Array[Int],
                  var baseGroup: String,
                  var groupDim: mutable.HashMap [String, String],
+                 var upRelations: String = null,
+                 var downRelations: String = null,
                  var maxStep: Int = 0,
-                 var resultGroupDim: mutable.HashMap [String, String] = null
+                 var resultGroupDim: mutable.HashMap[String, String] = null,
+                 var relationsMapArray: mutable.HashMap[Int, ListBuffer[FunnelEvent]] = null
                  ) {
   def typeOrdering: Long = ts
 
