@@ -139,8 +139,8 @@ case class WindowFunnel(windowLit: Expression,
     }
   }
 
-  def toGroupNames(): Unit = {
-    groupDimNames = groupExpr.children.filter(e => e.isInstanceOf[CreateNamedStruct])
+  def toGroupNames: Seq[String] = {
+    groupExpr.children.filter(e => e.isInstanceOf[CreateNamedStruct])
       .map(e => {
         val split = e.toString.split(",")
         split.apply(1).trim + split.apply(2).trim
@@ -183,7 +183,7 @@ case class WindowFunnel(windowLit: Expression,
     }
 
     var groupDim: mutable.HashMap [String, String] = null
-    if(groupDimNames == null) toGroupNames()
+    if(groupDimNames == null) groupDimNames = toGroupNames
     if(groupDimNames.nonEmpty) {
       groupDim = mutable.HashMap [String, String]()
       val stepDimValues: GenericInternalRow = toGroups(groupExpr, input)
@@ -213,7 +213,7 @@ case class WindowFunnel(windowLit: Expression,
 
 
   override def eval(buffer: ListBuffer[FunnelEvent]): Any = {
-    if (groupDimNames == null) toGroupNames()
+    if (groupDimNames == null) groupDimNames = toGroupNames
     val returnRow = new GenericInternalRow(2 + groupDimNames.size )
     if (buffer.isEmpty) {
       returnRow(0) = -1
@@ -222,9 +222,9 @@ case class WindowFunnel(windowLit: Expression,
     val sorted = buffer.sortBy(_.ts)
     val maxStepEvent = modelType match {
       case SIMPLE => doSimpleEval(sorted)
-      case SIMPLE_REL => doSimpleRelations(sorted)
+      case SIMPLE_REL => doSimpleRelationsEval(sorted)
       case REPEAT => doRepeatEval(sorted)
-      case REPEAT_REL => null
+      case REPEAT_REL => doRepeatRelationsEval(sorted)
       case _ => null
     }
     if (maxStepEvent == null) {
@@ -243,10 +243,9 @@ case class WindowFunnel(windowLit: Expression,
     }
     returnRow
   }
-
   def calculateFunnel(currentMaxStepEvent: FunnelEvent): FunnelEvent = {
     // Get the lowest and earliest event in the largest step collection
-    var maxStepEvent = currentMaxStepEvent.relationsMapArray(currentMaxStepEvent.maxStep).sortBy(_.ts).apply(0)
+    var maxStepEvent = currentMaxStepEvent.relationsMapArray(currentMaxStepEvent.maxStep).minBy(_.ts)
     // Set maxStepEvent grouping information
     val maxStepEventId = currentMaxStepEvent.maxStep.toString
     for ((x, y) <- maxStepEvent.groupDim) {
@@ -279,7 +278,7 @@ case class WindowFunnel(windowLit: Expression,
     currentMaxStepEvent
   }
 
-  def doSimpleRelations(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
+  def doSimpleRelationsEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
     var currentMaxStepEvent: FunnelEvent = null
     val startEvents = ListBuffer[FunnelEvent]()
     for (event <- sorted) {
@@ -356,58 +355,75 @@ case class WindowFunnel(windowLit: Expression,
   def doSimpleEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
     var currentMaxStepEvent: FunnelEvent = null
     val startEvents: ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
-    breakable {
-      for (event <- sorted) {
-        if (event.eid == 0) {
-          if (event.groupDim != null) {
-            event.resultGroupDim = mutable.HashMap[String, String]()
-          }
-          if (currentMaxStepEvent == null) {
-            currentMaxStepEvent = event
-          }
-          startEvents.append(event)
-        } else {
-          breakable {
-            for (i <- startEvents.indices.reverse) {
-              val startEvent = startEvents.apply(i)
-              // The window period is exceeded or the current max step time is exceeded
-              if ((event.ts - startEvent.ts) > window || startEvent.ts < currentMaxStepEvent.ts) {
-                break()
-              }
-              val nextMaxStep = startEvent.maxStep + 1
-              var upward: Boolean = false
-              // greater than the next max step, it can be calculated upward
-              if (event.eid > nextMaxStep) upward = true
-              if (event.eid == nextMaxStep) {
-                if (event.groupDim != null) {
-                  val nextStepString = nextMaxStep.toString
-                  for ((x, y) <- event.groupDim) {
-                    if (x.startsWith(nextStepString)) {
-                      startEvent.resultGroupDim.put(x, y)
-                    }
+    for (event <- sorted) {
+      if (event.eid == 0) {
+        if (event.groupDim != null) {
+          event.resultGroupDim = mutable.HashMap[String, String]()
+        }
+        if (currentMaxStepEvent == null) {
+          currentMaxStepEvent = event
+        }
+        startEvents.append(event)
+      } else {
+        breakable {
+          for (i <- startEvents.indices.reverse) {
+            val startEvent = startEvents.apply(i)
+            // The window period is exceeded or the current max step time is exceeded
+            if ((event.ts - startEvent.ts) > window || startEvent.ts < currentMaxStepEvent.ts) {
+              break()
+            }
+            val nextMaxStep = startEvent.maxStep + 1
+            var upward: Boolean = false
+            // greater than the next max step, it can be calculated upward
+            if (event.eid > nextMaxStep) upward = true
+            if (event.eid == nextMaxStep) {
+              if (event.groupDim != null) {
+                val nextStepString = nextMaxStep.toString
+                for ((x, y) <- event.groupDim) {
+                  if (x.startsWith(nextStepString)) {
+                    startEvent.resultGroupDim.put(x, y)
                   }
                 }
-                startEvent.maxStep = nextMaxStep
-                if (nextMaxStep >= currentMaxStepEvent.maxStep) {
-                  // >= Find the closest to the target event
-                  currentMaxStepEvent = startEvent
+              }
+              startEvent.maxStep = nextMaxStep
+              if (nextMaxStep >= currentMaxStepEvent.maxStep) {
+                // >= Find the closest to the target event
+                currentMaxStepEvent = startEvent
+                if (currentMaxStepEvent.maxStep + 1 == evtNum) {
+                  return currentMaxStepEvent
                 }
               }
-              if (!upward) {
-                // No greater than the next max step, no upward calculation is required
-                break()
-              }
+            }
+            if (!upward) {
+              // No greater than the next max step, no upward calculation is required
+              break()
             }
           }
-        }
-        if (currentMaxStepEvent != null && (currentMaxStepEvent.maxStep + 1) == evtNum) {
-          break()
         }
       }
     }
     currentMaxStepEvent
   }
 
+  def doRepeatRelationsEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
+    var currentMaxStepEvent: FunnelEvent = null
+    val startEvents = ListBuffer[FunnelEvent]()
+    for (event <- sorted) {
+      if (event.eids.contains(0)) {
+        event.relationsMapArray = mutable.HashMap[Int, ListBuffer[FunnelEvent]]()
+        startEvents.append(event)
+        if (event.groupDim != null) {
+          event.resultGroupDim = mutable.HashMap[String, String]()
+        }
+        if (currentMaxStepEvent == null) {
+          currentMaxStepEvent = event
+        }
+      }
+
+
+    }
+    currentMaxStepEvent
+  }
   def doRepeatEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
     var currentMaxStepEvent: FunnelEvent = null
     val startEvents: ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
@@ -503,12 +519,12 @@ case class WindowFunnel(windowLit: Expression,
       "\"nullable\":false,\"metadata\":{}}"
     val base_group_name = "{\"name\":\"" + baseGroupName + "\",\"type\":\"string\"," +
       "\"nullable\":false,\"metadata\":{}}"
-    val sb = new StringBuilder()
+    val sb: mutable.StringBuilder = new mutable.StringBuilder()
     sb.append("{\"type\":\"struct\",\"fields\":[")
       .append(max_step_id).append(",")
       .append(base_group_name).append(",")
 
-    if(groupDimNames == null ) toGroupNames()
+    if(groupDimNames == null ) groupDimNames = toGroupNames
     for(name <- groupDimNames) {
       sb.append("{\"name\":\"").append(name)
         .append("\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}")
