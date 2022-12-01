@@ -175,8 +175,10 @@ case class WindowFunnel(windowLit: Expression,
         if (baseGroup == null) baseGroup = "null"
       }
       if (isRelations) {
-        upRelations = relations.values(eid).asInstanceOf[GenericInternalRow].values(0).toString
-        downRelations = relations.values(eid).asInstanceOf[GenericInternalRow].values(1).toString
+        val up = relations.values(eid).asInstanceOf[GenericInternalRow].values(0)
+        if( up != null ) upRelations = up.toString
+        val down = relations.values(eid).asInstanceOf[GenericInternalRow].values(1)
+        if( down != null) downRelations = down.toString
       }
     }
 
@@ -303,7 +305,8 @@ case class WindowFunnel(windowLit: Expression,
             // get up step id
             val upStepId = event.eid - 1
             if (upStepId == 0 ) {
-              if (startEvent.downRelations.equals(event.upRelations)) {
+              if ( startEvent.downRelations != null && event.upRelations != null &&
+                startEvent.downRelations.equals(event.upRelations)) {
                 startEvent.relationsMapArray.getOrElseUpdate(event.eid, ListBuffer())
                   .append(event)
                 // update max step id
@@ -312,7 +315,9 @@ case class WindowFunnel(windowLit: Expression,
                 if (startEvent.maxStep > currentMaxStepEvent.maxStep) {
                   currentMaxStepEvent = startEvent
                 }
-                if (startEvent.maxStep + 1 == evtNum) return calculateFunnel(currentMaxStepEvent)
+                if (currentMaxStepEvent.maxStep + 1 == evtNum) {
+                  return calculateFunnel(currentMaxStepEvent)
+                }
               }
             } else {
               // get all up step id events
@@ -322,7 +327,8 @@ case class WindowFunnel(windowLit: Expression,
                   for (upStep <- upStepArray) {
                     // The associated attribute is matched successfully.
                     // Save the event to the next collection
-                    if (upStep.downRelations.equals(event.upRelations)) {
+                    if (upStep.downRelations != null && event.upRelations != null &&
+                      upStep.downRelations.equals(event.upRelations)) {
                       startEvent.relationsMapArray.getOrElseUpdate(event.eid, ListBuffer())
                         .append(event)
                       // update max step id
@@ -331,7 +337,7 @@ case class WindowFunnel(windowLit: Expression,
                       if (startEvent.maxStep > currentMaxStepEvent.maxStep) {
                         currentMaxStepEvent = startEvent
                       }
-                      if (startEvent.maxStep + 1 == evtNum) {
+                      if (currentMaxStepEvent.maxStep + 1 == evtNum) {
                         return calculateFunnel(currentMaxStepEvent)
                       }
                       break()
@@ -360,11 +366,10 @@ case class WindowFunnel(windowLit: Expression,
             currentMaxStepEvent = event
           }
           startEvents.append(event)
-        }
-        breakable {
-          for (i <- startEvents.indices.reverse) {
-            val startEvent = startEvents.apply(i)
-            if (event != startEvent) {
+        } else {
+          breakable {
+            for (i <- startEvents.indices.reverse) {
+              val startEvent = startEvents.apply(i)
               // The window period is exceeded or the current max step time is exceeded
               if ((event.ts - startEvent.ts) > window || startEvent.ts < currentMaxStepEvent.ts) {
                 break()
@@ -388,7 +393,6 @@ case class WindowFunnel(windowLit: Expression,
                   currentMaxStepEvent = startEvent
                 }
               }
-
               if (!upward) {
                 // No greater than the next max step, no upward calculation is required
                 break()
