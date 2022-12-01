@@ -159,6 +159,8 @@ case class WindowFunnel(windowLit: Expression,
     var upRelations: String = null
     var downRelations: String = null
     var relations: GenericInternalRow = null
+    var repeatUpRelations: mutable.HashMap[Int, String] = null
+    var repeatDownRelations: mutable.HashMap[Int, String] = null
     if (isRelations) {
       relations = eventRelations.eval(input).asInstanceOf[GenericInternalRow]
     }
@@ -167,6 +169,17 @@ case class WindowFunnel(windowLit: Expression,
       eids = toIntegerArray(evtConds, input)
       if (eids.apply(0) < 0 ) return buffer
       if(eids.contains(0)) baseGroup = toString(baseGroupExpr, input)
+      if (isRelations) {
+        repeatUpRelations = mutable.HashMap[Int, String]()
+        repeatDownRelations = mutable.HashMap[Int, String]()
+        for(id <- eids) {
+          val up = relations.values(id).asInstanceOf[GenericInternalRow].values(0)
+          if (up != null) repeatUpRelations.put(id, up.toString)
+          val down = relations.values(id).asInstanceOf[GenericInternalRow].values(1)
+          if (down != null) repeatDownRelations.put(id, down.toString)
+        }
+
+      }
     } else {
       eid = toInteger(evtConds, input)
       if(eid < 0) return buffer
@@ -201,7 +214,8 @@ case class WindowFunnel(windowLit: Expression,
       }
     }
 
-    val event = FunnelEvent(ts, eid, eids, baseGroup, groupDim, upRelations, downRelations)
+    val event = FunnelEvent(ts, eid, eids, baseGroup, groupDim,
+      upRelations, downRelations, repeatUpRelations, repeatDownRelations)
     buffer.append(event)
     buffer
   }
@@ -255,25 +269,30 @@ case class WindowFunnel(windowLit: Expression,
     }
     // Find the matching path from the largest step up
     for(i <- (1 until currentMaxStepEvent.maxStep).reverse) {
-      val tmp = currentMaxStepEvent.relationsMapArray(i)
-        // filter matched relations events
-        .filter(_.downRelations.equals(maxStepEvent.upRelations))
-        .sortBy(-_.ts) // Desc by time
-      breakable {
-        for (event <- tmp) {
-          // Get the event whose first time is less than the next step
-          if (event.ts < maxStepEvent.ts) {
-            for ((x, y) <- event.groupDim) {
-              // i.toString： Grouping dimension of current step id
-              if (x.startsWith(i.toString)) {
-                currentMaxStepEvent.resultGroupDim.put(x, y)
-              }
-            }
-            maxStepEvent = event
-            break()
-          }
+      val stepArray = currentMaxStepEvent.relationsMapArray(i)
+      val closerEvent = if (isRepeat) stepArray.filter(e => {
+          val downValue = e.repeatDownRelations.get(i)
+          val upValue = maxStepEvent.repeatUpRelations.get(i + 1)
+          downValue!=null && upValue!=null &&
+          e != maxStepEvent && // filter  repeat itself
+          e.ts < maxStepEvent.ts && // filter  time
+          downValue.equals(upValue) // filter matched relations
+        })
+        .maxBy(_.ts)
+      else stepArray.filter(e => {
+          e != maxStepEvent && // filter  repeat itself
+          e.ts < maxStepEvent.ts && // filter  time
+          e.downRelations.equals(maxStepEvent.upRelations) // filter matched relations
+        })
+        .maxBy(_.ts) // max time , get closer to the next step
+
+      for ((x, y) <- closerEvent.groupDim) {
+        // i.toString： Grouping dimension of current step id
+        if (x.startsWith(i.toString)) {
+          currentMaxStepEvent.resultGroupDim.put(x, y)
         }
       }
+      maxStepEvent = closerEvent
     }
     currentMaxStepEvent
   }
@@ -389,9 +408,9 @@ case class WindowFunnel(windowLit: Expression,
               if (nextMaxStep >= currentMaxStepEvent.maxStep) {
                 // >= Find the closest to the target event
                 currentMaxStepEvent = startEvent
-                if (currentMaxStepEvent.maxStep + 1 == evtNum) {
-                  return currentMaxStepEvent
-                }
+              }
+              if (currentMaxStepEvent.maxStep + 1 == evtNum) {
+                return currentMaxStepEvent
               }
             }
             if (!upward) {
@@ -405,6 +424,58 @@ case class WindowFunnel(windowLit: Expression,
     currentMaxStepEvent
   }
 
+  def doRepeatEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
+    var currentMaxStepEvent: FunnelEvent = null
+    val startEvents: ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
+    for (event <- sorted) {
+      if (event.eids.contains(0)) {
+        if (event.groupDim != null) {
+          event.resultGroupDim = mutable.HashMap[String, String]()
+        }
+        if (currentMaxStepEvent == null) {
+          currentMaxStepEvent = event
+        }
+        startEvents.append(event)
+      }
+      breakable {
+        for (i <- startEvents.indices.reverse) {
+          val startEvent = startEvents.apply(i)
+          if (event != startEvent) {
+            if ((event.ts - startEvent.ts) > window || startEvent.ts < currentMaxStepEvent.ts) {
+              break()
+            }
+            val nextMaxStep = startEvent.maxStep + 1
+            var upward: Boolean = false
+            for (eid <- event.eids) {
+              if (eid > nextMaxStep) upward = true
+              if (eid == nextMaxStep) {
+                if (event.groupDim != null) {
+                  val nextStepString = nextMaxStep.toString
+                  for ((x, y) <- event.groupDim) {
+                    if (x.startsWith(nextStepString)) {
+                      startEvent.resultGroupDim.put(x, y)
+                    }
+                  }
+                }
+                startEvent.maxStep = nextMaxStep
+                if (nextMaxStep > currentMaxStepEvent.maxStep) {
+                  // do not >= , Repeated events may be missed
+                  currentMaxStepEvent = startEvent
+                }
+                if (currentMaxStepEvent.maxStep + 1 == evtNum) {
+                  return currentMaxStepEvent
+                }
+              }
+            }
+            if (!upward) {
+              break()
+            }
+          }
+        }
+      }
+    }
+    currentMaxStepEvent
+  }
   def doRepeatRelationsEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
     var currentMaxStepEvent: FunnelEvent = null
     val startEvents = ListBuffer[FunnelEvent]()
@@ -419,66 +490,70 @@ case class WindowFunnel(windowLit: Expression,
           currentMaxStepEvent = event
         }
       }
-
-
-    }
-    currentMaxStepEvent
-  }
-  def doRepeatEval(sorted: ListBuffer[FunnelEvent]): FunnelEvent = {
-    var currentMaxStepEvent: FunnelEvent = null
-    val startEvents: ListBuffer[FunnelEvent] = ListBuffer[FunnelEvent]()
-    breakable {
-      for (event <- sorted) {
-        if (event.eids.contains(0)) {
-          if (event.groupDim != null) {
-            event.resultGroupDim = mutable.HashMap[String, String]()
-          }
-          if (currentMaxStepEvent == null) {
-            currentMaxStepEvent = event
-          }
-          startEvents.append(event)
-        }
-        breakable {
-          for (i <- startEvents.indices.reverse) {
-            val startEvent = startEvents.apply(i)
-            if (event != startEvent) {
-              if ((event.ts - startEvent.ts) > window  || startEvent.ts < currentMaxStepEvent.ts ) {
-                break()
-              }
-              val nextMaxStep = startEvent.maxStep + 1
-              var goAhead: Boolean = false
-              for(eid <- event.eids) {
-                if (eid > nextMaxStep ) goAhead = true
-                if (eid == nextMaxStep) {
-                  if (event.groupDim != null) {
-                    val nextStepString = nextMaxStep.toString
-                    for ((x, y) <- event.groupDim) {
-                      if (x.startsWith(nextStepString)) {
-                        startEvent.resultGroupDim.put(x, y)
+      breakable {
+        for (i <- startEvents.indices.reverse) {
+          val startEvent = startEvents.apply(i)
+          if(event != startEvent) {
+            if ((event.ts - startEvent.ts) > window) {
+              break()
+            }
+            // Traverse each ID ,Match the associated attributes with the previous step
+            for(id <- event.eids) {
+              // get up step id
+              val upStepId = id - 1
+              if (upStepId == 0) {
+                val startEventDownValue = startEvent.repeatDownRelations.get(0)
+                val eventUpValue = event.repeatUpRelations.get(id)
+                if (startEventDownValue != null && eventUpValue != null
+                  && startEventDownValue.equals(eventUpValue)) {
+                  startEvent.relationsMapArray.getOrElseUpdate(id, ListBuffer())
+                    .append(event)
+                  // update max step id
+                  if (id > startEvent.maxStep) startEvent.maxStep = id
+                  // update max step event
+                  if (startEvent.maxStep > currentMaxStepEvent.maxStep) {
+                    currentMaxStepEvent = startEvent
+                  }
+                  if (currentMaxStepEvent.maxStep + 1 == evtNum) {
+                    return calculateFunnel(currentMaxStepEvent)
+                  }
+                }
+              } else {
+                // get all up step id events
+                val upStepArray: ListBuffer[FunnelEvent] = startEvent.relationsMapArray.getOrElse(upStepId, null)
+                if (upStepArray != null) {
+                  breakable {
+                    for (upStep <- upStepArray) {
+                      // The associated attribute is matched successfully.
+                      // Save the event to the next collection
+                      val upStepDownValue = upStep.repeatDownRelations.get(upStepId)
+                      val eventUpValue = event.repeatUpRelations.get(id)
+                      if (upStepDownValue != null && eventUpValue != null &&
+                        upStep != event && upStepDownValue.equals(eventUpValue)) {
+                        startEvent.relationsMapArray.getOrElseUpdate(id, ListBuffer())
+                          .append(event)
+                        // update max step id
+                        if (id > startEvent.maxStep) startEvent.maxStep = id
+                        // update max step event
+                        if (startEvent.maxStep > currentMaxStepEvent.maxStep) {
+                          currentMaxStepEvent = startEvent
+                        }
+                        if (currentMaxStepEvent.maxStep + 1 == evtNum) {
+                          return calculateFunnel(currentMaxStepEvent)
+                        }
+                        break()
                       }
                     }
                   }
-                  startEvent.maxStep = nextMaxStep
-                  if (nextMaxStep > currentMaxStepEvent.maxStep) {
-                    // no >= , Repeated events may be missed
-                    currentMaxStepEvent = startEvent
-                  }
                 }
-              }
-              if (!goAhead) {
-                break()
               }
             }
           }
         }
-        if (currentMaxStepEvent != null && (currentMaxStepEvent.maxStep + 1) == evtNum) {
-          break()
-        }
       }
     }
-    currentMaxStepEvent
+    calculateFunnel(currentMaxStepEvent)
   }
-
   override def serialize(buffer: ListBuffer[FunnelEvent]): Array[Byte] = {
     serializerInstance.serialize(buffer).array()
   }
@@ -548,6 +623,8 @@ case class FunnelEvent(ts: Long,
                  var groupDim: mutable.HashMap [String, String],
                  var upRelations: String = null,
                  var downRelations: String = null,
+                 var repeatUpRelations: mutable.HashMap [Int, String] = null,
+                 var repeatDownRelations: mutable.HashMap [Int, String] = null,
                  var maxStep: Int = 0,
                  var resultGroupDim: mutable.HashMap[String, String] = null,
                  var relationsMapArray: mutable.HashMap[Int, ListBuffer[FunnelEvent]] = null
