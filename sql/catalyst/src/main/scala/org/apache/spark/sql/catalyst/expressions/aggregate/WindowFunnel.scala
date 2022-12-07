@@ -258,6 +258,7 @@ case class WindowFunnel(windowLit: Expression,
     returnRow
   }
   def calculateFunnel(currentMaxStepEvent: FunnelEvent): FunnelEvent = {
+    if (currentMaxStepEvent.maxStep==0) return currentMaxStepEvent
     // Get the lowest and earliest event in the largest step collection
     var maxStepEvent = currentMaxStepEvent.relationsMapArray(currentMaxStepEvent.maxStep).minBy(_.ts)
     // Set maxStepEvent grouping information
