@@ -1257,6 +1257,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     )
     result4.show(false)
   }
+
   test("test compress get bitmap") {
     val colNames = Seq("user_id", "event_id", "event_time", "dim")
     val df1 = Seq(
