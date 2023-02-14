@@ -22,7 +22,7 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream, Da
 import org.apache.spark.sql.TypedImperativeAggregateSuite.TypedMax
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, GenericInternalRow, ImplicitCastInputTypes, SpecificInternalRow}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{TypedImperativeAggregate, WindowFunnel}
+import org.apache.spark.sql.catalyst.expressions.aggregate.TypedImperativeAggregate
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
@@ -224,7 +224,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     val oneWeek = 604800000 // 7 * 60 * 60 * 24 * 1000
     val colNames = Seq("uid", "eid", "dim1", "dim2", "measure1", "measure2", "ts")
 
-    // test attribution models
+    //  test attribution models
     {
       Seq(
         (1, 1, null, null, 0, 0, 1),
@@ -235,15 +235,49 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       ).toDF(colNames: _*).createOrReplaceTempView("events")
 
       val model = Seq("FIRST", "LAST", "LINEAR", "POSITION", "DECAY")
-      val contrib = Seq(
-        "[1.0];[0.0];[0.0];[0.0]"
-        , "[0.0];[0.0];[0.0];[1.0]"
-        , "[0.25];[0.25];[0.25];[0.25]"
-        , "[0.4];[0.1];[0.1];[0.4]"
-        , "[0.25];[0.25];[0.25];[0.5]"
+      val result = Seq(
+        // FIRST
+        "[[s1,-1.0,null,null,1]];" +
+          "[[s1,1.0,WrappedArray(100.0, 1000.0),null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s4,-1.0,null,null,1]]"
+        // LAST
+        , "[[s1,-1.0,null,null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s4,-1.0,null,null,1]];" +
+          "[[s4,1.0,WrappedArray(100.0, 1000.0),null,1]]"
+        // LINEAR
+        , "[[s1,-1.0,null,null,1]];" +
+          "[[s1,0.25,WrappedArray(25.0, 250.0),null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s2,0.25,WrappedArray(25.0, 250.0),null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s3,0.25,WrappedArray(25.0, 250.0),null,1]];" +
+          "[[s4,-1.0,null,null,1]];" +
+          "[[s4,0.25,WrappedArray(25.0, 250.0),null,1]]"
+        // POSITION
+        , "[[s1,-1.0,null,null,1]];" +
+          "[[s1,0.4,WrappedArray(40.0, 400.0),null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s2,0.1,WrappedArray(10.0, 100.0),null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s3,0.1,WrappedArray(10.0, 100.0),null,1]];" +
+          "[[s4,-1.0,null,null,1]];" +
+          "[[s4,0.4,WrappedArray(40.0, 400.0),null,1]]"
+        // DECAY
+        , "[[s1,-1.0,null,null,1]];" +
+          "[[s1,0.5,WrappedArray(50.0, 500.0),null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s2,0.5,WrappedArray(50.0, 500.0),null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s3,0.5,WrappedArray(50.0, 500.0),null,1]];" +
+          "[[s4,-1.0,null,null,1]];" +
+          "[[s4,1.0,WrappedArray(100.0, 1000.0),null,1]]"
       )
 
-      model.zip(contrib).foreach { case (model, contrib) =>
+      model.zip(result).foreach { case (model, result) =>
         val df = spark.sql(
           "select explode(at) as event from (select attribution(604810000, ts, " +
             buildSource(Seq(1, 2, 3, 4)) +
@@ -254,37 +288,84 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
             "array(measure1, measure2), " +
             s"'$model', " +
             "null) as at " +
-            "from events group by uid) order by event.name"
+            "from events group by uid) order by event.name,event.contrib"
         )
-        val actual = df.selectExpr("event.contrib").collect().mkString(";")
-        assert(contrib == actual)
+        // df.show(false)
+        val actual = df.collect().mkString(";")
+        // println(actual)
+        assert(result == actual)
       }
     }
 
     // test measures, grouping infos
     {
       Seq(
-        (1, 1, "foo", "bar", 0, 0, 1),
-        (1, 2, "foo1", "bar1", 0, 0, 2),
-        (1, 3, "foo2", "bar2", 100, 1000, 3)
+        (1, 1, "foo1", "bar1", 0, 0, 1),
+        (1, 2, "foo2", "bar2", 0, 0, 2),
+        //  (1, 2, "foo2", "bar2", 0, 0, 2),
+        (1, 2, "foo3", "bar3", 0, 0, 3),
+        (1, 2, "foo3", "bar3", 0, 0, 3),
+        //  (1, 2, "foo4", "bar4", 0, 0, 4),
+        //  (1, 2, "foo5", "bar5", 0, 0, 5),
+        (1, 2, null, null, 0, 0, 5),
+        (1, 3, "foo6", "bar6", 100, 1000, 6),
+
+        //  (1, 2, "foo7", "bar7", 0, 0, 7),
+        (1, 1, "foo8", "bar8", 0, 0, 8),
+        (1, 3, "foo9", "bar9", 100, 1000, 9),
+
+        //  (1, 3, "foo7", "bar7", 100, 1000, 20),
+        (1, 3, "foo7", "bar7", 100, 1000, 30),
       ).toDF(colNames: _*).createOrReplaceTempView("events")
+      val result =
+        "[[d,0.0,null,null,1]];" +
+          "[[s1,1.0,WrappedArray(100.0),WrappedArray(foo8),1]];" +
+          "[[s1,-1.0,null,WrappedArray(foo1),1]];" +
+          "[[s1,-1.0,null,WrappedArray(foo8),1]];" +
+          "[[s2,1.0,WrappedArray(100.0),WrappedArray(null),1]];" +
+          "[[s2,-1.0,null,WrappedArray(null),1]];" +
+          "[[s2,-1.0,null,WrappedArray(foo2),1]];" +
+          "[[s2,-1.0,null,WrappedArray(foo3),2]]"
 
       val df = spark.sql(
-        "select explode(at) as event from (select attribution(604810000, ts, " +
+        //  "select " +
+        //    "event.name," +
+        //     "event.groupingInfos[0] by1," +
+        //     "event.groupingInfos[1] by2," +
+        //     "sum(case when event.contrib = -1 then event.count else 0 end) count_pv_all," +
+        //     "sum(case when event.contrib > -1 then event.count else 0 end) count_pv_valid," +
+        //     "count(" +
+        //      "distinct case when event.contrib = -1 then uid else null end" +
+        //     ") count_uv_all," +
+        //     "count(" +
+        //       "distinct case when event.contrib > -1 then uid else null end" +
+        //     ") count_uv_valid," +
+        //     "sum(case when event.contrib > -1 then event.contrib else 0 end) sum_contrib," +
+        //     "sum(" +
+        //      "case when event.contrib > -1 then event.measureContrib[0] else 0 end" +
+        //     ") sum_measure_contrib " +
+        //      "from ( " +
+        "select " +
+          //                "uid," +
+          "explode(at) as event from (" +
+          "select uid,attribution(11, ts, " +
           buildSource(Seq(1, 2)) +
           buildTarget(Seq(3)) +
           "null," +
           "'NONE', " +
           "null," +
-          "array(measure1, measure2), " +
-          s"'LINEAR', " +
-          "array(dim1, dim2)) as at " +
-          "from events group by uid) order by event.name"
+          "array(measure1), " +
+          "'LAST', " + // "FIRST", "LAST", "LINEAR", "POSITION", "DECAY"
+          "array(dim1)" +
+          ") as at " +
+          "from events group by uid"
+          + ") order by event.name,event.count"
+        //             + ") group by 1,2,3 order by 1,2,3"
       )
-      assert("[WrappedArray(50.0, 500.0)];[WrappedArray(50.0, 500.0)]" ==
-        df.selectExpr("event.measureContrib").collect().mkString(";"))
-      assert("[WrappedArray(foo, bar)];[WrappedArray(foo2, bar2)]" ==
-        df.selectExpr("event.groupingInfos").collect().mkString(";"))
+      //          df.show(false)
+      val actual = df.collect().mkString(";")
+      //          println(actual)
+      assert(result == actual)
     }
 
     // test source relate to target, relation build
@@ -298,22 +379,41 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
         (1, 4, null, "bar", 0, 0, 9),
         (1, 5, null, "foo", 1000, 0, 10)
       ).toDF(colNames: _*).createOrReplaceTempView("events")
-
-      val sql = "select explode(at) as event from (select attribution(7, ts, " +
-        buildSource(Seq(1, 2, 3, 4)) +
-        buildTarget(Seq(5)) +
-        "null," +
-        "'TARGET_TO_SOURCE', " +
-        s"array(${buildMap(Seq("t5"), Seq("s2", "s3"), "dim1", "dim1")}," +
-        s"${buildMap(Seq("t5"), Seq("s1", "s4"), "dim2", "dim2")})," +
-        "array(measure1), " +
-        s"'LINEAR', " +
-        "null) as at " +
-        "from events group by uid) order by event.name"
-
-      val result = spark.sql(sql)
-        .selectExpr("event.name", "event.measureContrib").collect().mkString(";")
-      assert("[d,WrappedArray()];[s4,WrappedArray(500.0)];[s4,WrappedArray(500.0)]" == result)
+      val result =
+        "[[s1,-1.0,null,null,1]];" +
+          "[[s2,0.5,WrappedArray(50.0),null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s3,0.5,WrappedArray(50.0),null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s4,1.0,WrappedArray(1000.0),null,1]];" +
+          "[[s4,-1.0,null,null,2]]"
+      val sql =
+        "select explode(at) as event " +
+          "from (" +
+          "select " +
+          "attribution(" +
+          "7, ts, " +
+          "case " +
+          "when eid=1 then 's1' " +
+          "when eid=2 then 's2' " +
+          "when eid=3 then 's3' " +
+          "when eid=4 then 's4'else null end  ," +
+          "case when eid=5 then 't5'else null end  ," +
+          "null," +
+          "'TARGET_TO_SOURCE', " +
+          "array(" +
+          "map('t5', dim1, 's2', dim1)," +
+          "map('t5', dim1, 's3', dim1)," +
+          "map('t5', dim2, 's1', dim2)," +
+          "map('t5', dim2, 's4', dim2)" +
+          ")," +
+          "array(measure1), " +
+          "'LINEAR', " +
+          "null) as at from events group by uid  " +
+          ") order by event.name,event.count"
+      val df = spark.sql(sql)
+      val actual = df.collect().mkString(";")
+      assert(result == actual)
     }
 
     // test ahead
@@ -321,80 +421,100 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       Seq(
         (1, 1, null, "foo", 0, 0, 4),
         (1, 2, "bar", null, 0, 0, 5),
-        (1, 0, "bar", "foo", 0, 0, 6),
+        (1, 0, "bar", "foo1", 0, 0, 6),
         (1, 3, "bar", null, 0, 0, 7),
         (1, 4, null, null, 0, 0, 8),
         (1, 0, "bar", "foo", 0, 0, 9),
         (1, 4, null, null, 0, 0, 10),
         (1, 5, null, "foo", 100, 0, 11)
       ).toDF(colNames: _*).createOrReplaceTempView("events")
-
+      val result =
+        "[[s1,-1.0,null,null,1]];" +
+          "[[s2,-1.0,null,null,1]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s4,1.0,WrappedArray(100.0),null,1]];" +
+          "[[s4,-1.0,null,null,2]]"
       // ahead relate to target
-      {
-        val sql = "select explode(at) as event from (select attribution(7, ts, " +
-          buildSource(Seq(1, 2, 3, 4)) +
-          buildTarget(Seq(5)) +
-          buildAhead(Seq(0)) +
-          "'TARGET_TO_AHEAD', " +
-          s"array(${buildMap(Seq("t5"), Seq("a0"), "dim2", "dim2")})," +
-          "array(measure1), " +
-          s"'LINEAR', " +
-          "null) as at " +
-          "from events group by uid) order by event.name"
-        val result = spark.sql(sql)
-          .selectExpr("event.name", "event.measureContrib").collect().mkString(";")
-        assert("[s2,WrappedArray(50.0)];[s4,WrappedArray(50.0)]" == result)
-      }
-
-      // ahead relate to source and target
-      {
-        val sql = "select explode(at) as event from (select attribution(7, ts, " +
-          buildSource(Seq(1, 2, 3, 4)) +
-          buildTarget(Seq(5)) +
-          buildAhead(Seq(0)) +
-          "'TARGET_TO_AHEAD_TO_SOURCE', " +
-          s"array(${buildMap(Seq("t5"), Seq("a0"), "dim2", "dim2")}," +
-          s"${buildMap(Seq("a0"), Seq("s1", "s2", "s3", "s4"), "dim1", "dim1")})," +
-          "array(measure1), " +
-          s"'LINEAR', " +
-          "null) as at " +
-          "from events group by uid) order by event.name"
-        val result = spark.sql(sql)
-          .selectExpr("event.name", "event.measureContrib").collect().mkString(";")
-        assert("[s2,WrappedArray(100.0)]" == result)
-      }
+      val sql = "select explode(at) as event from (" +
+        "select " +
+        "attribution(" +
+        "7, ts, " +
+        "case " +
+        "when eid=1 then 's1' " +
+        "when eid=2 then 's2' " +
+        "when eid=3 then 's3' " +
+        "when eid=4 then 's4' else null end  ," +
+        "case when eid=5 then 't5' else null end  ," +
+        "case when eid=0 then 'a0' else null end  ," +
+        "'TARGET_TO_AHEAD', " +
+        "array(map('t5', dim2, 'a0', dim2))," +
+        "array(measure1), 'LINEAR', null) as at " +
+        "from events group by uid) order by event.name"
+      val df = spark.sql(sql)
+      //   df.show(false)
+      val actual = df.collect().mkString(";")
+      //  println(actual)
+      assert(result == actual)
     }
-
-    // mutiple seq
+    // ahead relate to source and target
     {
       Seq(
         (1, 1, null, "foo", 0, 0, 1),
-        (1, 0, "bar", "foo1", 0, 0, 2), // aheah foo1
-        (1, 1, null, "foo", 0, 0, 3),
-        (1, 0, "bar", "foo1", 0, 0, 4), // aheah foo1
-        (1, 2, "bar", null, 0, 0, 5),
-        (1, 0, "bar", "foo", 0, 0, 6), // aheah foo
-        (1, 3, "bar", null, 0, 0, 7),
-        (1, 4, null, null, 0, 0, 8),
-        (1, 0, "bar", "foo", 0, 0, 9), // aheah foo
-        (1, 4, null, null, 0, 0, 10),
-        (1, 5, null, "foo", 100, 0, 11),
-        (1, 5, null, "foo1", 1000, 0, 12)
+        (1, 2, "bar", null, 0, 0, 2),
+        (1, 1, "bar", "foo", 0, 0, 3),
+        (1, 3, "bar1", null, 0, 0, 4),
+        (1, 5, "bar1", "foo", 0, 0, 5), // ahead
+        (1, 4, "bar", null, 0, 0, 6),
+        (1, 6, "bar1", "foo", 0, 0, 7), // ahead
+        (1, 5, "bar", "foo", 0, 0, 8), // ahead
+        (1, 6, "bar", "foo", 0, 0, 9), // ahead
+        (1, 7, null, "foo", 100, 0, 10),
+        (1, 2, "bar1", null, 0, 0, 11),
+        (1, 6, "bar1", "foo", 0, 0, 12), // ahead
+        (1, 1, "bar1", "foo", 0, 0, 13),
+        (1, 5, "bar1", "foo", 0, 0, 14), // ahead
+        (1, 7, null, "foo", 100, 0, 15)
       ).toDF(colNames: _*).createOrReplaceTempView("events")
-
-      val sql = "select explode(at) as event from (select attribution(9, ts, " +
-        buildSource(Seq(1, 2, 3, 4)) +
-        buildTarget(Seq(5)) +
-        buildAhead(Seq(0)) +
-        "'TARGET_TO_AHEAD', " +
-        s"array(${buildMap(Seq("t5"), Seq("a0"), "dim2", "dim2")})," +
+      val result =
+        "[[s1,-1.0,null,null,3]];" +
+          "[[s2,1.0,WrappedArray(100.0),null,1]];" +
+          "[[s2,-1.0,null,null,2]];" +
+          "[[s3,-1.0,null,null,1]];" +
+          "[[s4,1.0,WrappedArray(100.0),null,1]];" +
+          "[[s4,-1.0,null,null,1]]"
+      val sql = "select explode(at) as event from (" +
+        "select " +
+        "attribution(100, ts, " +
+        "case " +
+        "when eid=1 then 's1' " +
+        "when eid=2 then 's2' " +
+        "when eid=3 then 's3' " +
+        "when eid=4 then 's4'else null end  ," +
+        "case when eid=7 then 't7'else null end  ," +
+        "case " +
+        "when eid=5 then 'a5'" +
+        "when eid=6 then 'a6' else null end  ," +
+        "'TARGET_TO_AHEAD_TO_SOURCE', " +
+        "array(" +
+        "map('t7', dim2, 'a5', dim2)," +
+        "map('t7', dim2, 'a6', dim2)," +
+        "map('a5', dim1, 's1', dim1)," +
+        "map('a5', dim1, 's2', dim1)," +
+        "map('a5', dim1, 's3', dim1)," +
+        "map('a5', dim1, 's4', dim1)," +
+        "map('a6', dim1, 's1', dim1)," +
+        "map('a6', dim1, 's2', dim1)," +
+        "map('a6', dim1, 's3', dim1)," +
+        "map('a6', dim1, 's4', dim1)" +
+        ")," +
         "array(measure1), " +
-        s"'LINEAR', " +
-        "null) as at " +
-        "from events group by uid) order by event.name"
-      val result = spark
-        .sql(sql).selectExpr("event.name", "event.measureContrib").collect().mkString(";")
-      assert("[d,WrappedArray()];[s2,WrappedArray(50.0)];[s4,WrappedArray(50.0)]" == result)
+        "'LAST', null) as at " + // "FIRST", "LAST", "LINEAR", "POSITION", "DECAY"
+        "from events group by uid) " +
+        "order by event.name"
+      val df = spark.sql(sql)
+      val actual = df.collect().mkString(";")
+      //    println(actual)
+      assert(result == actual)
     }
   }
 
@@ -404,10 +524,6 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
 
   private def buildTarget(eid: Seq[Int], comma: Boolean = true): String = {
     buildCaseWhen(eid, "t", comma)
-  }
-
-  private def buildAhead(eid: Seq[Int], comma: Boolean = true): String = {
-    buildCaseWhen(eid, "a", comma)
   }
 
   private def buildCaseWhen(eid: Seq[Int], prefix: String, comma: Boolean = true): String = {
@@ -421,603 +537,1079 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     }
   }
 
-  private def buildMap(e1List: Seq[String], e2List: Seq[String],
-                       dim1: String, dim2: String): String = {
-    (for (e1 <- e1List; e2 <- e2List) yield (e1, e2)).map { case (e1, e2) =>
-      s"map('$e1', $dim1, '$e2', $dim2)"
-    }.mkString(",")
+
+  test("single window funnel test") {
+    {
+      val result = "[1,2,a1,b5,c6]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1','b1','c1'),
+            (1, 1, 3, 'a1','b3','c3'),
+            (1, 0, 4, 'a4','b30','c4'),
+            (1, 1, 5, 'a1','b5','c5'),
+            (1, 0, 6, 'a6','b5','c6')
+            AS test(user_id,event_id,event_time,dim0,dim1,dim2)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'REPEAT_REL',
+              event_time,
+              tmp0.dim0,
+              case when event_id = 0 then '0,2'
+               when event_id = 1 then '1'
+              else '-1' end,
+              struct(struct('NONE',dim0),
+                    struct(dim0,dim1),
+                    struct(dim1,'NONE')),
+              struct(struct(1, dim1),struct(2, dim2))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim0'] 0dim0 ,
+          seq['1dim1'] 1dim1 ,seq['2dim2'] 2dim2
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
   }
-
-
-  private def checkWindowAnswer (df: DataFrame, expected: Seq[(Int, Int)] ): Unit = {
-    df.show (false)
-    checkAnswer (df, expected.toDF () )
-  }
-
-  test ("test window funnel 0004") {
-    val colNames = Seq ("event_id", "user_id", "uid", "event_time", "access_time",
-      "string1", "string2", "int1", "int2",
-      "bigint1", "bigint2", "double1", "double2", "id")
-    val df1 = Seq (
-      (0, 100000001, "200000001", "1647581938058", "1647581638051",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 6)
-      , (1, 100000001, "200000002", "1647581938059", "1647581638052",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 7)
-      , (0, 100000001, "200000003", "1647581938060", "1647581638053",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 8)
-      , (1, 100000001, "200000004", "1647581938061", "1647581638054",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 9)
-      , (0, 100000001, "200000005", "1647581938062", "1647581638055",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 10)
-      , (1, 100000001, "200000006", "1647581938063", "1647581638056",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 11)
-      , (1, 100000001, "200000007", "1647581938064", "1647581638057",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 12)
-      , (2, 100000001, "200000008", "1647581938065", "1647581638058",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 13)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events1")
-    val result = spark.sql (
-      "select user_id, window_funnel(\n" +
-        " 5 * 24 * 60 * 60,\n" +
-        " 6,\n" +
-        " event_time,\n" +
-        " case when event_id = 0 then '0, 2'\n" +
-        " when event_id = 1 then '1,3'\n" +
-        " when event_id = 2 then '4'\n" +
-        " else '-1' end,\n" +
-        " bigint1,\n" +
-        " struct(struct(2, user_id), struct(1, id), struct(3, id)) ) seq\n" +
-        "from events1\n" +
-        "where id >=6 and id <=35\n" +
-        "group by user_id\n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().sortBy(_.toString).toSeq.toString
-    val expect = "WrappedArray([100000001,[4,1647581938058,100000001,7,9]])"
-    assert(result == expect)
-  }
-
-  test ("test window funnel 0003") {
-    val colNames = Seq ("event_id", "user_id", "uid", "event_time", "access_time",
-      "string1", "string2", "int1", "int2",
-      "bigint1", "bigint2", "double1", "double2", "id")
-    val df1 = Seq (
-      (0, 100000001, "200000001", "1647581938058", "1747581638051",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 6)
-      , (1, 100000001, "200000002", "1647581938059", "1747581638052",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 7)
-      , (2, 100000001, "200000003", "1647581938060", "1747581638053",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 8)
-      , (0, 100000001, "200000004", "1647581938061", "1747581638054",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 9)
-      , (1, 100000001, "200000005", "1647581938062", "1747581638055",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 10)
-      , (2, 100000001, "200000006", "1647581938063", "1747581638056",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 11)
-      , (3, 100000001, "200000007", "1647581938064", "1747581638057",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 12)
-      , (4, 100000001, "200000008", "1647581938065", "1747581638058",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 13)
-      , (0, 100000001, "200000009", "1647581938066", "1747581638059",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 14)
-      , (1, 100000001, "200000010", "1647581938067", "1747581638060",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 15)
-      , (2, 100000001, "200000011", "1647581938068", "1747581638061",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 16)
-      , (3, 100000001, "200000012", "1647581938069", "1747581638062",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 17)
-      , (0, 100000002, "200000013", "1647581938070", "1747581638063",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 18)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events1")
-    val result = spark.sql (
-      "select user_id, window_funnel(\n" +
-        " 5 * 24 * 60 * 60,\n" +
-        " 6,\n" +
-        " event_time,\n" +
-        " case when event_id = 0 then '0'\n" +
-        " when event_id = 1 then '1'\n" +
-        " when event_id = 2 then '2'\n" +
-        " when event_id = 3 then '3'\n" +
-        " when event_id = 4 then '4'\n" +
-        " else -1 end,\n" +
-        " bigint1,\n" +
-        " struct(struct(2, user_id), struct(1, id), struct(3, id)) ) seq\n" +
-        "from events1\n" +
-        "where id >=6 and id <=35\n" +
-        "group by user_id\n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([100000001,[4,1647581938061,100000001,10,12]]," +
-      " [100000002,[0,1647581938070,null,null,null]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel 0002") {
-    val colNames = Seq ("event_id", "user_id", "uid", "event_time", "access_time",
-      "string1", "string2", "int1", "int2",
-      "bigint1", "bigint2", "double1", "double2", "id")
-    val df1 = Seq (
-      (0, 100000001, "200000001", "1647581938058", "1647581638051",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 6)
-      , (1, 100000001, "200000002", "1647581938059", "1647581638052",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 7)
-      , (2, 100000001, "200000003", "1647581938060", "1647581638053",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 8)
-      , (3, 100000001, "200000004", "1647581938061", "1647581638054",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 9)
-      , (4, 100000001, "200000005", "1647581938062", "1647581638055",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 10)
-      , (5, 100000001, "200000006", "1647581938063", "1647581638056",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 11)
-      , (0, 100000002, "200000007", "1647581938064", "1647581638057",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 12)
-      , (1, 100000002, "200000008", "1647581938065", "1647581638058",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 13)
-      , (2, 100000002, "200000009", "1647581938066", "1647581638059",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 14)
-      , (3, 100000002, "200000010", "1647581938067", "1647581638060",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 15)
-      , (4, 100000002, "200000011", "1647581938068", "1647581638061",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 16)
-      , (5, 100000002, "200000012", "1647581938069", "1647581638062",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 17)
-      , (0, 100000003, "200000013", "1647581938070", "1647581638063",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 18)
-      , (1, 100000003, "200000014", "1647581938071", "1647581638064",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 19)
-      , (2, 100000003, "200000015", "1647581938072", "1647581638065",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 20)
-      , (3, 100000003, "200000016", "1647581938073", "1647581638066",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 21)
-      , (4, 100000003, "200000017", "1647581938074", "1647581638067",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 22)
-      , (5, 100000003, "200000018", "1647581938075", "1647581638068",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 23)
-      , (0, 100000004, "200000019", "1647581938076", "1647581638069",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 24)
-      , (1, 100000004, "200000020", "1647581938077", "1647581638070",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 25)
-      , (2, 100000004, "200000021", "1647581938078", "1647581638071",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 26)
-      , (3, 100000004, "200000022", "1647581938079", "1647581638072",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 27)
-      , (4, 100000004, "200000023", "1647581938080", "1647581638073",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 28)
-      , (5, 100000004, "200000024", "1647581938081", "1647581638074",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 29)
-      , (0, 100000005, "200000025", "1647581938082", "1647581638075",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 30)
-      , (1, 100000005, "200000026", "1647581938083", "1647581638076",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 31)
-      , (2, 100000005, "200000027", "1647581938084", "1647581638077",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 32)
-      , (3, 100000005, "200000028", "1647581938085", "1647581638078",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 33)
-      , (4, 100000005, "200000029", "1647581938086", "1647581638079",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 34)
-      , (5, 100000005, "200000030", "1647581938087", "1647581638080",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 35)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events1")
-    val result = spark.sql (
-      "select user_id, window_funnel(\n" +
-        " 5 * 24 * 60 * 60,\n" +
-        " 6,\n" +
-        " event_time,\n" +
-        " case when event_id = 0 or event_id = 2 then '0, 2'\n" +
-        " when event_id = 1 then '1'\n" +
-        " when event_id = 3 then '3'\n" +
-        " else -1 end,\n" +
-        " bigint1,\n" +
-        " struct(struct(2, user_id), struct(1, id), struct(3, id)) ) seq\n" +
-        "from events1\n" +
-        "where id >=6 and id <=35\n" +
-        "group by user_id\n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([100000001,[3,1647581938058,100000001,7,9]]," +
-      " [100000002,[3,1647581938064,100000002,13,15]]," +
-      " [100000003,[3,1647581938070,100000003,19,21]]," +
-      " [100000004,[3,1647581938076,100000004,25,27]]," +
-      " [100000005,[3,1647581938082,100000005,31,33]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel 0001") {
-    val colNames = Seq ("event_id", "user_id", "uid", "event_time", "access_time",
-      "string1", "string2", "int1", "int2",
-      "bigint1", "bigint2", "double1", "double2", "id")
-    val df1 = Seq (
-      (0, 100000001, "200000001", "1647581938058", "1647581638051",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 6)
-      , (1, 100000001, "200000002", "1647581938059", "1647581638052",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 7)
-      , (0, 100000001, "200000003", "1647581938060", "1647581638053",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 8)
-      , (3, 100000001, "200000004", "1647581938061", "1647581638054",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 9)
-      , (4, 100000001, "200000005", "1647581938062", "1647581638055",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 10)
-      , (5, 100000001, "200000006", "1647581938063", "1647581638056",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 11)
-      , (0, 100000002, "200000007", "1647581938064", "1647581638057",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 12)
-      , (1, 100000002, "200000008", "1647581938065", "1647581638058",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 13)
-      , (0, 100000002, "200000009", "1647581938066", "1647581638059",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 14)
-      , (3, 100000002, "200000010", "1647581938067", "1647581638060",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 15)
-      , (4, 100000002, "200000011", "1647581938068", "1647581638061",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 16)
-      , (5, 100000002, "200000012", "1647581938069", "1647581638062",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 17)
-      , (0, 100000003, "200000013", "1647581938070", "1647581638063",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 18)
-      , (1, 100000003, "200000014", "1647581938071", "1647581638064",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 19)
-      , (0, 100000003, "200000015", "1647581938072", "1647581638065",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 20)
-      , (3, 100000003, "200000016", "1647581938073", "1647581638066",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 21)
-      , (4, 100000003, "200000017", "1647581938074", "1647581638067",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 22)
-      , (5, 100000003, "200000018", "1647581938075", "1647581638068",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 23)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events1")
-    val result = spark.sql (
-      "select user_id, window_funnel(\n" +
-        " 5 * 24 * 60 * 60,\n" +
-        " 6,\n" +
-        " event_time,\n" +
-        " case when event_id = 0 then '0, 2'\n" +
-        " when event_id = 1 then '1'\n" +
-        " when event_id = 3 then '3'\n" +
-        " else -1 end, \n" +
-        " bigint1,\n" +
-        " struct(struct(2, user_id), struct(1, id), struct(3, id))\n ) seq\n" +
-        "from events1\n" +
-        "group by user_id\n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([100000001,[3,1647581938058,100000001,7,9]]," +
-      " [100000002,[3,1647581938064,100000002,13,15]]," +
-      " [100000003,[3,1647581938070,100000003,19,21]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel 0000") {
-    val colNames = Seq ("event_id", "user_id", "uid", "event_time", "access_time",
-      "string1", "string2", "int1", "int2",
-      "bigint1", "bigint2", "double1", "double2", "id")
-    val df1 = Seq (
-      (0, 100000001, "200000001", "1647581938058", "1647581638051",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 6)
-      , (1, 100000001, "200000002", "1647581938059", "1647581638052",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 7)
-      , (2, 100000001, "200000003", "1647581938060", "1647581638053",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 8)
-      , (3, 100000001, "200000004", "1647581938061", "1647581638054",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 9)
-      , (4, 100000001, "200000005", "1647581938062", "1647581638055",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 10)
-      , (5, 100000001, "200000006", "1647581938063", "1647581638056",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 11)
-      , (0, 100000002, "200000007", "1647581938064", "1647581638057",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 12)
-      , (1, 100000002, "200000008", "1647581938065", "1647581638058",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 13)
-      , (2, 100000002, "200000009", "1647581938066", "1647581638059",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 14)
-      , (3, 100000002, "200000010", "1647581938067", "1647581638060",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 15)
-      , (4, 100000002, "200000011", "1647581938068", "1647581638061",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 16)
-      , (5, 100000002, "200000012", "1647581938069", "1647581638062",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 17)
-      , (0, 100000003, "200000013", "1647581938070", "1647581638063",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 18)
-      , (1, 100000003, "200000014", "1647581938071", "1647581638064",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 19)
-      , (2, 100000003, "200000015", "1647581938072", "1647581638065",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 20)
-      , (3, 100000003, "200000016", "1647581938073", "1647581638066",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 21)
-      , (4, 100000003, "200000017", "1647581938074", "1647581638067",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 22)
-      , (5, 100000003, "200000018", "1647581938075", "1647581638068",
-        "string_1", "string_2", 1, 2, 1L, 2L, 1d, 2d, 23)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events1")
-    val result = spark.sql (
-      "select user_id, window_funnel(\n" +
-        " 5 * 24 * 60 * 60,\n" +
-        " 6,\n" +
-        " event_time,\n" +
-        " event_id,\n" +
-        " bigint1,\n" +
-        " struct(struct(2, user_id), struct(1, id))\n ) seq\n" +
-        "from events1\n" +
-        "group by user_id\n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([100000001,[5,1647581938058,100000001,7]]," +
-      " [100000002,[5,1647581938064,100000002,13]]," +
-      " [100000003,[5,1647581938070,100000003,19]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel 002") {
-    val colNames = Seq ("lstg_format_name", "cal_dt", "lstg_site_id",
-      "seller_id", "trans_id")
-
-    val df1 = Seq (
-      ("ABIN", "2012-01-01", 0, 10000294, 0)
-      , ("FP-non GTC", "2012-01-01", 0, 10000294, 1)
-      , ("Others", "2012-01-01", 0, 10000294, 2)
-      , ("Auction", "2012-01-01", 0, 10000294, 3)
-      , ("ABIN", "2012-01-01", 1, 10000294, 0)
-      , ("FP-non GTC", "2012-01-01", 1, 10000294, 1)
-      , ("Others", "2012-01-01", 1, 10000294, 2)
-
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("test_kylin_fact")
-    val result = spark.sql (
-      "select seller_id," +
-        " window_funnel(\n 5 * 24 * 60 * 60, \n" +
-        " 4, \n" +
-        " cal_dt, \n" +
-        " case when lstg_format_name = 'ABIN' or lstg_format_name = 'FP-non GTC' then '0,1'\n" +
-        " when lstg_format_name = 'Others' then 2\n" +
-        " when lstg_format_name = 'Auction' then 3\n" +
-        " else -1 end, \n" +
-        " case when lstg_format_name = 'ABIN' then lstg_site_id\n" +
-        " when lstg_format_name = 'FP-non GTC' then lstg_site_id\n" +
-        " when lstg_format_name = 'Others' then lstg_site_id\n" +
-        " when lstg_format_name = 'Auction' then lstg_site_id\n" +
-        " else null end,\n" +
-        " struct(struct(1, seller_id), struct(3, trans_id)) \n ) seq\n" +
-        "from test_kylin_fact \n\n" +
-        "where cal_dt >= '2012-01-01' and cal_dt < '2012-01-02' \n" +
-        "group by seller_id \n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([10000294,[3,1325376000000,10000294,3]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel 001") {
-    val colNames = Seq ("lstg_format_name", "cal_dt", "lstg_site_id",
-      "seller_id", "trans_id")
-
-    val df1 = Seq (
-      ("ABIN", "2012-01-01", 0, 10000294, 0)
-      , ("FP-non GTC", "2012-01-01", 0, 10000294, 1)
-      , ("Others", "2012-01-01", 0, 10000294, 2)
-      , ("Auction", "2012-01-01", 0, 10000294, 3)
-      , ("ABIN", "2012-01-01", 1, 10000294, 0)
-      , ("FP-non GTC", "2012-01-01", 1, 10000294, 1)
-      , ("Others", "2012-01-01", 1, 10000294, 2)
-      , ("Auction", "2012-01-01", 0, 10000403, 4)
-      , ("FP-non GTC", "2012-01-01", 15, 10000397, 5)
-      , ("Auction", "2012-01-01", 0, 10000025, 6)
-      , ("FP-GTC", "2012-01-01", 0, 10000670, 7)
-      , ("FP-non GTC", "2012-01-01", 0, 10000288, 8)
-      , ("FP-non GTC", "2012-01-01", 0, 10000753, 9)
-      , ("Others", "2012-01-01", 0, 10000117, 10)
-      , ("FP-non GTC", "2012-01-01", 0, 10000392, 11)
-      , ("FP-non GTC", "2012-01-01", 0, 10000207, 12)
-      , ("ABIN", "2012-01-01", 0, 10000896, 13)
-      , ("ABIN", "2012-01-01", 23, 10000527, 14)
-      , ("FP-GTC", "2012-01-01", 3, 10000549, 15)
-      , ("ABIN", "2012-01-01", 3, 10000081, 16)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("test_kylin_fact")
-    val result = spark.sql (
-      "select seller_id," +
-        " window_funnel(\n 5 * 24 * 60 * 60, \n" +
-        " 4, \n" +
-        " cal_dt, \n" +
-        " case when lstg_format_name = 'ABIN' then 0\n" +
-        " when lstg_format_name = 'FP-non GTC' then 1\n" +
-        " when lstg_format_name = 'Others' then 2\n" +
-        " when lstg_format_name = 'Auction' then 3\n" +
-        " else -1 end, \n" +
-        " case when lstg_format_name = 'ABIN' then lstg_site_id\n" +
-        " when lstg_format_name = 'FP-non GTC' then lstg_site_id\n" +
-        " when lstg_format_name = 'Others' then lstg_site_id\n" +
-        " when lstg_format_name = 'Auction' then lstg_site_id\n" +
-        " else null end,\n" +
-        " struct(struct(1, seller_id), struct(3, trans_id)) \n ) seq\n" +
-        "from test_kylin_fact \n\n" +
-        "where cal_dt >= '2012-01-01' and cal_dt < '2012-01-02' \n" +
-        "group by seller_id \n" +
-        "order by seq desc\n" +
-        "LIMIT 500"
-    ).collect().toSeq.sortBy(_.toString).toString
-    val actual = "WrappedArray([10000025,[-1,-1,null,null]]," +
-      " [10000081,[0,1325376000000,null,null]]," +
-      " [10000117,[-1,-1,null,null]]," +
-      " [10000207,[-1,-1,null,null]]," +
-      " [10000288,[-1,-1,null,null]]," +
-      " [10000294,[3,1325376000000,10000294,3]]," +
-      " [10000392,[-1,-1,null,null]]," +
-      " [10000397,[-1,-1,null,null]]," +
-      " [10000403,[-1,-1,null,null]]," +
-      " [10000527,[0,1325376000000,null,null]]," +
-      " [10000549,[-1,-1,null,null]]," +
-      " [10000670,[-1,-1,null,null]]," +
-      " [10000753,[-1,-1,null,null]]," +
-      " [10000896,[0,1325376000000,null,null]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel 000") {
-    val colNames = Seq ("uid", "eid", "dim1", "dim2",
-      "o_dim1", "o_dim2", "o_dim3", "dim3", "dim4", "ts")
-
-    val df1 = Seq (
-      (901, 1, "null1", "aa1", 1L, 2.1d, 0.1f, null, null, "2021-01-02")
-      , (901, 2, "null2", "aa2", 2L, 2.2d, 0.2f, null, null, "2021-01-02")
-      , (901, 3, "null3", "aa3", 3L, 2.3d, 0.3f, null, null, "2021-01-03")
-      , (901, 4, "null4", "aa4", 4L, 2.41d, 0.41f, null, null, "2021-01-03")
-      , (901, 4, "null4", "aa4", 4L, 2.42d, 0.42f, null, null, "2021-01-04")
-      , (901, 5, "null5", "aa5", 5L, 2.5d, 0.5f, null, null, "2021-01-05")
-      , (901, 1, "w0001", "888", 11L, 3.1d, 0.6f, null, null, "2021-01-02")
-      , (901, 2, "w0002", "bb7", 12L, 3.2d, 0.7f, null, null, "2021-01-03")
-      , (901, 3, "w0003", "bb8", 13L, 3.3d, 0.8f, null, null, "2021-01-04")
-      , (901, 6, "null6", "aa6", 6L, 2.6d, 0.6f, null, null, "2021-01-05")
-      , (902, 1, "ee001", "cc1", 21L, 4.1d, 0.9f, null, null, "2021-01-02")
-      , (902, 2, "ee002", "cc2", 22L, 4.2d, 0.11f, null, null, "2021-01-03")
-      , (902, 3, "ee003", "cc3", 23L, 4.3d, 0.12f, null, null, "2021-01-03")
-      , (902, 4, "ee004", "cc4", 24L, 4.4d, 0.13f, null, null, "2021-01-04")
-      , (902, 5, "ee005", "cc5", 25L, 4.5d, 0.14f, null, null, "2021-01-05")
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events00")
-    val result = spark.sql (
-      "select uid, " +
-        "window_funnel(100000, 6, ts, eid - 1, dim3, " +
-        "struct(struct(1,eid),struct(2,dim1),struct(1,eid)" +
-        ",struct(2,dim2),struct(2,dim2)" +
-        ",struct(3,o_dim1),struct(3,o_dim2),struct(3,o_dim3),struct(3,dim4)" +
-        "))" +
-        " from events00 group by uid").collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([901,[1,1609545600000,2,null,2,null,null,null,null,null,null]]," +
-      " [902,[0,1609545600000,null,null,null,null,null,null,null,null,null]])"
-    assert(actual == result)
-  }
-
-  test ("test window funnel") {
-    val colNames = Seq ("uid", "eid", "dim1", "dim2",
-      "o_dim1", "o_dim2", "o_dim3", "dim3", "ts")
-
-    val df1 = Seq (
-      // "uid", "eid", "dim1", "dim2", "dim3", "ts"
-      // single sequence
-      (901, 1, "null1", "aa1", 1L, 2.1d, 0.1f, null, 1646364222007L)
-      , (901, 2, "null2", "aa2", 2L, 2.2d, 0.2f, null, 1646364236022L)
-      , (901, 3, "null3", "aa3", 3L, 2.3d, 0.3f, null, 1646364251414L)
-      , (901, 4, "null4", "aa4", 4L, 2.41d, 0.41f, null, 1646364263738L)
-      , (901, 4, "null4", "aa4", 4L, 2.42d, 0.42f, null, 1646364263739L)
-      , (901, 5, "null5", "aa5", 5L, 2.5d, 0.5f, null, 1646364273238L)
-      , (901, 1, "w0001", "888", 11L, 3.1d, 0.6f, null, 1600001L)
-      , (901, 2, "w0002", "bb7", 12L, 3.2d, 0.7f, null, 1600002L)
-      , (901, 3, "w0003", "bb8", 13L, 3.3d, 0.8f, null, 1600003L)
-      , (901, 6, "null6", "aa6", 6L, 2.6d, 0.6f, null, 1646364273998L)
-      , (902, 1, "ee001", "cc1", 21L, 4.1d, 0.9f, null, 1001L)
-      , (902, 2, "ee002", "cc2", 22L, 4.2d, 0.11f, null, 1002L)
-      , (902, 3, "ee003", "cc3", 23L, 4.3d, 0.12f, null, 1003L)
-      , (902, 4, "ee004", "cc4", 24L, 4.4d, 0.13f, null, 1004L)
-      , (902, 5, "ee005", "cc5", 25L, 4.5d, 0.14f, null, 1005L)
-    ).toDF (colNames: _*)
-    df1.createOrReplaceTempView ("events00")
-    val result = spark.sql (
-      "select uid, " +
-        "window_funnel(100000, 6, ts, eid - 1, dim3, " +
-        "struct(struct(1,eid),struct(2,dim1),struct(1,eid)" +
-        ",struct(2,dim2),struct(2,dim2)" +
-        ",struct(3,o_dim1),struct(3,o_dim2),struct(3,o_dim3)" +
-        "))" +
-        " from events00 group by uid").collect().sortBy(_.toString).toSeq.toString
-    val actual = "WrappedArray([901,[5,1646364222007,2,null3,2,aa3,aa3,4,2.41,0.41]]," +
-      " [902,[4,1001,2,ee003,2,cc3,cc3,24,4.4,0.13]])"
-    assert(actual == result)
-
-    val colNames2 = Seq ("uid", "eid", "dim1", "dim2", "ts")
-    val df2 = Seq (
-      (901, 1, null, null, 1)
-      , (901, 2, null, null, 2)
-      , (901, 1, null, null, 3)
-      , (901, 3, null, null, 4)
-      , (901, 1, null, null, 5)
-      , (901, 2, null, null, 6)
-      , (901, 4, null, null, 7)
-      , (901, 5, null, null, 11)
-    ).toDF (colNames2: _*)
-    df2.createOrReplaceTempView ("events")
-    val result2 = spark.sql ("select uid, window_funnel(10, 5, ts, eid - 1, null, null)" +
-      " from events group by uid").collect().sortBy(_.toString).toSeq.toString
-    val actual2 = "WrappedArray([901,[4,1]])"
-    assert(actual2 == result2)
-
-    val colNames3 = Seq ("uid", "eid", "dim1", "dim2", "ts")
-    val df3 = Seq (
-      (901, 1, "CN", null, 1)
-      , (901, 2, null, null, 2)
-      , (901, 1, null, null, 3)
-      , (901, 3, null, "CN", 4)
-      , (901, 1, null, null, 5)
-      , (901, 2, null, null, 6)
-      , (901, 4, null, "CN", 7)
-      , (901, 5, null, null, 8)
-      // multiple sequence with dim
-      , (902, 1, "CN", null, 1)
-      , (902, 2, null, null, 2)
-      , (902, 1, null, null, 3)
-      , (902, 3, null, "CN", 4)
-      , (902, 1, null, null, 5)
-      , (902, 2, null, null, 6)
-      , (902, 4, null, "US", 7)
-      , (902, 5, null, null, 8)
-    ).toDF (colNames3: _*)
-    df3.createOrReplaceTempView ("events3")
-    val result3 = spark.sql (
-      "select uid, window_funnel(10, 5, ts, eid - 1, " +
-        "case when eid = 1 then dim1 " +
-        "when eid = 2 then null " +
-        "when eid = 3 then dim2 " +
-        "when eid = 4 then dim2 " +
-        "else null end, null) from events3 group by uid")
-      .collect().sortBy(_.toString).toSeq.toString
-    val actual3 = "WrappedArray([901,[4,1]], [902,[2,1]])"
-    assert(actual3 == result3)
-  }
-
-  ignore ("test window funnel radnom") {
-    val events = (0 until 1000000).map {
-      _ =>
-        (random.nextInt (100000) + 1, // uid
-          random.nextInt (5) + 1, // evt id 1-5
-          "dim_" + random.nextInt (100), // dim col1 0-2
-          "dim_" + random.nextInt (100), // dim col2 0-2
-          random.nextInt (1000), // ts
+  test("test window funnel") {
+    // simple
+    {
+      val result = "[1,3,null]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1'),
+            (1, 0, 2, 'a2'),
+            (1, 0, 3, null),
+            (1, 1, 4, 'a4'),
+            (1, 2, 5, 'a5'),
+            (1, 3, 6, 'a6')
+            AS test(user_id,event_id,event_time,dim)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              10,-- window
+              4,
+              'SIMPLE',
+              event_time,
+              tmp0.dim,
+              case
+              when event_id = 0 then '0'
+              when event_id = 1 then '1'
+              when event_id = 2 then '2'
+              when event_id = 3 then '3'
+              else '-1' end,
+              struct(),
+              struct()
+            ) seq
+            from tmp0
+            group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim
+          from tmp1
+          """.stripMargin
+      )
+      //            df.show(false)
+      val actual = df.collect().mkString(";")
+      //            println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,3,a3,a4,a5,a8]"
+      val df = spark.sql(
+        """
+        with tmp0 as (
+          select * from values
+          (1, 0, 1, 'a1'),
+          (1, 1, 2, 'a2'),
+          (1, 0, 3, 'a3'),
+          (1, 1, 4, 'a4'),
+          (1, 2, 5, 'a5'),
+          (1, 1, 6, 'a6'),
+          (1, 2, 7, 'a7'),
+          (1, 3, 8, 'a8')
+          AS test(user_id,event_id,event_time,dim)
+        ),
+        tmp1 as (
+          select user_id, window_funnel(
+            10,-- window
+            4,
+            'SIMPLE',
+            event_time,
+            tmp0.dim,
+            case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+            else '-1' end,
+            struct(),
+            struct(struct(0, dim),struct(1, dim),struct(2, dim),struct(3, dim))
+          ) seq
+          from tmp0
+          group by user_id
         )
+        select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim,
+        seq['1dim'] 1dim, seq['2dim'] 2dim, seq['3dim'] 3dim
+        from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //            println(actual)
+      assert(result == actual)
     }
-    val df = events.toDF ("uid", "eid", "dim1", "dim2", "ts")
-    // println(s"generated")
-
-    //    df.orderBy("uid").show(100, false)
-
-    val wf = WindowFunnel (
-      lit (100).expr,
-      lit (5).expr,
-      Column ("ts").expr,
-      Column ("eid").expr,
-      lit (null).expr,
-      null
-    ).toAggregateExpression ()
-
-    println (s"started")
-    (0 until 5).foreach {
-      _ =>
-        val agg = df.groupBy ("uid").agg (Column (wf) )
-        val started = System.currentTimeMillis ()
-        val result = agg.collect ()
-        assert (result != null)
-        println (s">>>>> collected ${
-          System.currentTimeMillis () - started
-        }ms")
+    {
+      val result = "[1,3,a6,a7,a8,a9]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 2, 1, 'a1'),
+            (1, 1, 2, 'a2'),
+            (1, 2, 3, 'a3'),
+            (1, 0, 4, 'a4'),
+            (1, 1, 5, 'a5'),
+            (1, 0, 6, 'a6'),
+            (1, 1, 7, 'a7'),
+            (1, 3, 7, 'a7'),
+            (1, 2, 8, 'a8'),
+            (1, 1, 8, 'a8'),
+            (1, 0, 8, 'a8'),
+            (1, 2, 8, 'a8'),
+            (1, 3, 9, 'a9'),
+            (1, 1, 11, 'a11')
+            AS test(user_id,event_id,event_time,dim)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,-- window
+              4,
+              'SIMPLE',
+              event_time,
+              tmp0.dim,
+              case
+              when event_id = 0 then '0'
+              when event_id = 1 then '1'
+              when event_id = 2 then '2'
+              when event_id = 3 then '3'
+              else '-1' end,
+              struct(),
+              struct(struct(1, dim),struct(2, dim),struct(3, dim))
+            ) seq
+            from tmp0
+            group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim,
+          seq['1dim'] 1dim, seq['2dim'] 2dim, seq['3dim'] 3dim
+          from tmp1
+          """.stripMargin
+      )
+//      df.show(false)
+      val actual = df.collect().mkString(";")
+//      println(actual)
+      assert(result == actual)
     }
+
+    // SIMPLE_REL
+    {
+      val result = "[1,3,3,4,5,6]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, '1', '1', '1', '1'),
+            (1, 0, 2, '2', '2', '2', '2'),
+            (1, 0, 3, '3', '3', '3', '3'),
+            (1, 1, 4, '3', '4', '4', '4'),
+            (1, 2, 5, '5', '4', '5', '5'),
+            (1, 3, 6, '6', '6', '5', '6')
+            AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              10,-- window
+              4,
+              'SIMPLE_REL',
+              event_time,
+              tmp0.dim4,
+              case
+                when event_id = 0 then '0'
+                when event_id = 1 then '1'
+                when event_id = 2 then '2'
+                when event_id = 3 then '3'
+              else '-1' end,
+              struct(
+                struct('NONE',dim1),
+                struct(dim1,dim2),
+                struct(dim2,dim3),
+                struct(dim3,'NONE')
+              ),
+              struct(struct(1, dim4),struct(2, dim4),struct(3, dim4))
+            ) seq
+            from tmp0
+            group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+          seq['1dim4'] 1dim4, seq['2dim4'] 2dim4, seq['3dim4'] 3dim4
+          from tmp1
+          """.stripMargin
+      )
+//      df.show(false)
+      val actual = df.collect().mkString(";")
+//      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,3,10,21,31,70]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select * from values
+        (1, 0, 10, '10', '10', '10', '10'),
+        (1, 1, 20, '10', '20', '20', '20'),
+        (1, 1, 21, '10', '20', '21', '21'),
+        (1, 2, 30, '30', '20', '30', '30'),
+        (1, 2, 31, '30', '20', '30', '31'),
+        (1, 3, 40, '40', '40', '60', '40'),
+        (1, 1, 50, '10', '50', '50', '50'),
+        (1, 2, 60, '60', '50', '60', '60'),
+        (1, 3, 70, '70', '70', '30', '70'),
+        (1, 3, 80, '80', '80', '30', '80')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+      ),
+      tmp1 as (
+        select user_id, window_funnel(
+          100,-- window
+          4,
+          'SIMPLE_REL',
+          event_time,
+          tmp0.dim4,
+          case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+          else '-1' end,
+          struct(
+            struct('NONE',dim1),
+            struct(dim1,dim2),
+            struct(dim2,dim3),
+            struct(dim3,'NONE')
+          ),
+          struct(struct(1, dim4),struct(2, dim4),struct(3, dim4))
+        ) seq
+        from tmp0
+        group by user_id
+      )
+      select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+      seq['1dim4'] 1dim4, seq['2dim4'] 2dim4, seq['3dim4'] 3dim4
+      from tmp1
+      """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,3,100,210,310,700]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select * from values
+        (1, 0, 10, '10', '10', '10', '10'),
+        (1, 1, 20, '10', '20', '20', '20'),
+        (1, 1, 21, '10', '20', '21', '21'),
+        (1, 2, 30, '30', '20', '30', '30'),
+        (1, 2, 31, '30', '20', '30', '31'),
+        (1, 3, 40, '40', '40', '60', '40'),
+        (1, 1, 50, '10', '50', '50', '50'),
+        (1, 2, 60, '60', '50', '60', '60'),
+        (1, 3, 70, '70', '70', '31', '70'),
+        (1, 3, 80, '80', '80', '31', '80'),
+        (1, 0, 100, '100', '100', '100', '100'),
+        (1, 1, 200, '100', '200', '200', '200'),
+        (1, 1, 210, '100', '200', '210', '210'),
+        (1, 2, 300, '300', '200', '300', '300'),
+        (1, 2, 310, '300', '200', '300', '310'),
+        (1, 3, 400, '400', '400', '600', '400'),
+        (1, 1, 500, '100', '500', '500', '500'),
+        (1, 2, 600, '600', '500', '600', '600'),
+        (1, 3, 700, '700', '700', '300', '700'),
+        (1, 3, 800, '800', '800', '300', '800')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+      ),
+      tmp1 as (
+        select user_id, window_funnel(
+          1000,-- window
+          4,
+          'SIMPLE_REL',
+          event_time,
+          tmp0.dim4,
+          case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+          else '-1' end,
+          struct(
+            struct('NONE',dim1),
+            struct(dim1,dim2),
+            struct(dim2,dim3),
+            struct(dim3,'NONE')
+          ),
+          struct(struct(1, dim4),struct(2, dim4),struct(3, dim4))
+        ) seq
+        from tmp0
+        group by user_id
+      )
+      select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+      seq['1dim4'] 1dim4, seq['2dim4'] 2dim4, seq['3dim4'] 3dim4
+      from tmp1
+      """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,2,10,21,30,null]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select * from values
+        (1, 0, 10, '10', '10', '10', '10'),
+        (1, 1, 20, '10', '20', '20', '20'),
+        (1, 1, 21, '10', '20', '21', '21'),
+        (1, 2, 30, '30', '20', '30', '30'),
+        (1, 2, 31, '30', '20', '30', '31'),
+        (1, 3, 40, '40', '40', '60', '40'),
+        (1, 1, 50, '10', '50', '50', '50'),
+        (1, 2, 60, '60', '50', '60', '60'),
+        (1, 3, 70, '70', '70', '31', '70'),
+        (1, 3, 80, '80', '80', '31', '80'),
+        (1, 0, 100, '100', '100', '100', '100'),
+        (1, 1, 200, '100', '200', '200', '200'),
+        (1, 1, 210, '100', '200', '210', '210'),
+        (1, 2, 300, '300', '200', '300', '300'),
+        (1, 2, 310, '300', '200', '300', '310'),
+        (1, 3, 400, '400', '400', '600', '400'),
+        (1, 1, 500, '100', '500', '500', '500'),
+        (1, 2, 600, '600', '500', '600', '600'),
+        (1, 3, 700, '700', '700', '310', '700'),
+        (1, 3, 800, '800', '800', '310', '800')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+      ),
+      tmp1 as (
+        select user_id, window_funnel(
+          1000,-- window
+          4,
+          'SIMPLE_REL',
+          event_time,
+          tmp0.dim4,
+          case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+          else '-1' end,
+          struct(
+            struct('NONE',dim1),
+            struct(dim1,dim2),
+            struct(dim2,dim3),
+            struct(dim3,'NONE')
+          ),
+          struct(struct(1, dim4),struct(2, dim4),struct(3, dim4))
+        ) seq
+        from tmp0
+        group by user_id
+      )
+      select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+      seq['1dim4'] 1dim4, seq['2dim4'] 2dim4, seq['3dim4'] 3dim4
+      from tmp1
+      """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    // repeat
+    {
+      val result = "[1,2,a1,a3,a4]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1'),
+            (1, 0, 3, 'a3'),
+            (1, 0, 4, 'a4')
+            AS test(user_id,event_id,event_time,dim)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'REPEAT',
+              event_time,
+              tmp0.dim,
+              case when event_id = 0 then '0,1,2'  else '-1' end,
+              struct(),
+              struct(struct(0, dim),struct(1, dim),struct(2, dim))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim ,
+          seq['1dim'] 1dim ,seq['2dim'] 2dim
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,2,a5,a8,a9]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1'),
+          --  (1, 1, 3, 'a3'),
+            (1, 0, 4, 'a4'),
+            (1, 0, 5, 'a5'),
+            (1, 1, 8, 'a8'),
+            (1, 0, 9, 'a9')
+            AS test(user_id,event_id,event_time,dim)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'REPEAT',
+              event_time,
+              tmp0.dim,
+              case
+                when event_id = 0 then '0,2'
+                when event_id = 1 then '1'
+              else '-1' end,
+              struct(),
+              struct(struct(0, dim),struct(1, dim),struct(2, dim))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim'] 0dim ,
+          seq['1dim'] 1dim ,seq['2dim'] 2dim
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    // repeat rel
+    {
+      val result = "[1,3,100,210,310,700]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 10, '10', '10', '10', '10'),
+            (1, 1, 20, '10', '20', '20', '20'),
+            (1, 1, 21, '10', '20', '21', '21'),
+            (1, 2, 30, '30', '20', '30', '30'),
+            (1, 2, 31, '30', '20', '30', '31'),
+            (1, 3, 40, '40', '40', '60', '40'),
+            (1, 1, 50, '10', '50', '50', '50'),
+            (1, 2, 60, '60', '50', '60', '60'),
+            (1, 3, 70, '70', '70', '31', '70'),
+            (1, 3, 80, '80', '80', '31', '80'),
+            (1, 0, 100, '100', '100', '100', '100'),
+            (1, 1, 200, '100', '200', '200', '200'),
+            (1, 1, 210, '100', '200', '210', '210'),
+            (1, 2, 300, '300', '200', '300', '300'),
+            (1, 2, 310, '300', '200', '300', '310'),
+            (1, 3, 400, '400', '400', '600', '400'),
+            (1, 1, 500, '100', '500', '500', '500'),
+            (1, 2, 600, '600', '500', '600', '600'),
+            (1, 3, 700, '700', '700', '300', '700'),
+            (1, 3, 800, '800', '800', '300', '800')
+            AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              1000,-- window
+              4,
+              'REPEAT_REL',
+              event_time,
+              tmp0.dim4,
+              case
+                when event_id = 0 then '0'
+                when event_id = 1 then '1'
+                when event_id = 2 then '2'
+                when event_id = 3 then '3'
+              else '-1' end,
+              struct(
+                struct('NONE',dim1),
+                struct(dim1,dim2),
+                struct(dim2,dim3),
+                struct(dim3,'NONE')
+              ),
+              struct(struct(1, dim4),struct(2, dim4),struct(3, dim4))
+            ) seq
+            from tmp0
+            group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+          seq['1dim4'] 1dim4, seq['2dim4'] 2dim4, seq['3dim4'] 3dim4
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,2,a1,b3,c4]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1','b1','c1'),
+            (1, 1, 3, 'a1','b3','c3'),
+            (1, 0, 4, 'a4','b3','c4')
+            AS test(user_id,event_id,event_time,dim0,dim1,dim2)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'REPEAT_REL',
+              event_time,
+              tmp0.dim0,
+              case when event_id = 0 then '0,2'
+               when event_id = 1 then '1'
+              else '-1' end,
+              struct(struct('NONE',dim0),
+                    struct(dim0,dim1),
+                    struct(dim1,'NONE')),
+              struct(struct(1, dim1),struct(2, dim2))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim0'] 0dim0 ,
+          seq['1dim1'] 1dim1 ,seq['2dim2'] 2dim2
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,0,a1,null,null]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1','b1','c1'),
+            (1, 1, 3, 'a10','b3','c3'),
+            (1, 0, 4, 'a4','b3','c4')
+            AS test(user_id,event_id,event_time,dim0,dim1,dim2)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'REPEAT_REL',
+              event_time,
+              tmp0.dim0,
+              case when event_id = 0 then '0,2'
+               when event_id = 1 then '1'
+              else '-1' end,
+              struct(struct('NONE',dim0),
+                    struct(dim0,dim1),
+                    struct(dim1,'NONE')),
+              struct(struct(1, dim1),struct(2, dim2))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim0'] 0dim0 ,
+          seq['1dim1'] 1dim1 ,seq['2dim2'] 2dim2
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,2,a1,b5,c6]"
+      val df = spark.sql(
+        """
+          with tmp0 as (
+            select * from values
+            (1, 0, 1, 'a1','b1','c1'),
+            (1, 1, 3, 'a1','b3','c3'),
+            (1, 0, 4, 'a4','b30','c4'),
+            (1, 1, 5, 'a1','b5','c5'),
+            (1, 0, 6, 'a6','b5','c6')
+            AS test(user_id,event_id,event_time,dim0,dim1,dim2)
+          ),
+          tmp1 as (
+            select user_id, window_funnel(
+              6,
+              3,
+              'REPEAT_REL',
+              event_time,
+              tmp0.dim0,
+              case when event_id = 0 then '0,2'
+               when event_id = 1 then '1'
+              else '-1' end,
+              struct(struct('NONE',dim0),
+                    struct(dim0,dim1),
+                    struct(dim1,'NONE')),
+              struct(struct(1, dim1),struct(2, dim2))
+            ) seq
+            from tmp0 group by user_id
+          )
+          select user_id,seq['max_step'] max_step ,seq['0dim0'] 0dim0 ,
+          seq['1dim1'] 1dim1 ,seq['2dim2'] 2dim2
+          from tmp1
+        """.stripMargin
+      )
+      //      df.show(false)
+      val actual = df.collect().mkString(";")
+      //      println(actual)
+      assert(result == actual)
+    }
+
+  }
+  test("test compress bitmap build") {
+    val colNames = Seq("user_id", "event_id", "event_time", "dim")
+    val df1 = Seq(
+      (1, 0, -1, "a"),
+      (1, 1, 2, "a"),
+      (1, 2, 3, "a"),
+      (1, 0, 4, "a"),
+      (1, 1, 5, "a"),
+      (1, 2, 9, "a"),
+      (1, 1, 11, "a"),
+    ).toDF(colNames: _*)
+    df1.createOrReplaceTempView("events")
+    val result = spark.sql(
+      "select event_id ,compress_bitmap_build(event_time) " +
+        "from events group by event_id"
+    )
+    result.show(false)
   }
 
+  test("test compress bitmap contains") {
+    val colNames = Seq("user_id", "event_id", "event_time", "dim")
+    val df1 = Seq(
+      (1, 0, -1, "a"),
+      (1, 1, 2, "a"),
+      (1, 2, 3, "a"),
+      (1, 0, 4, "a"),
+      (1, 1, 5, "a"),
+      (1, 2, 9, "a"),
+      (1, 1, 11, "a"),
+    ).toDF(colNames: _*)
+    df1.createOrReplaceTempView("events")
+    val result = spark.sql(
+      "select compress_bitmap_contains(event_time," +
+        "'H4sIAAAAAAAAAGNgYGBgAmIGKwMGBkYGCBAAYhaG/0AAE/3/HyL6/z8ADXNawzEAAAA=') result " +
+        "from events "
+    )
+    result.show(false)
+
+    val result2 = spark.sql(
+      "select " +
+        "compress_bitmap_contains(event_time," +
+        "'H4sIAAAAAAAAAGNgYGBgBGIGKwMog4GJQQBMsjJwMwAAo5b30B8AAAA=') result2 " +
+        "from events " +
+        "where compress_bitmap_contains(event_time," +
+        "'H4sIAAAAAAAAAGNgYGBgBGIGKwMoA0gKAElmBk4GAAWcUMgdAAAA')"
+    )
+    result2.show(false)
+
+    val result4 = spark.sql(
+      "select compress_bitmap_contains(1," +
+        "'H4sIAAAAAAAAAGNgYGBgBGIGKwMoA0gKAElmBk4GAAWcUMgdAAAA') result4 " +
+        "from events "
+    )
+    result4.show(false)
+  }
+
+  test("test compress get bitmap") {
+    val colNames = Seq("user_id", "event_id", "event_time", "dim")
+    val df1 = Seq(
+      (1, 0, -1, "a"),
+      (1, 1, 2, "a"),
+      (1, 2, 3, "a"),
+      (1, 0, 4, "a"),
+      (1, 1, 5, "a"),
+      (1, 2, 9, "a"),
+      (1, 1, 11, "a"),
+    ).toDF(colNames: _*)
+    df1.createOrReplaceTempView("events")
+    val result = spark.sql(
+      "select  compress_get_bitmap(" +
+        "'com.mysql.jdbc.Driver','jdbc:mysql://localhost:3306/test','root'," +
+        "'xxxxx','select name from test where id =1') " +
+        "from events "
+    )
+    result.show(false)
+  }
+  test("single interval test") {
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];" +
+        "[1,[2023-02-13,a6,2000]];[1,[2023-02-13,a11,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','b1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b3'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 1, '2023-02-15 00:00:07.123', 'a8',null,'b4'),
+        (1, 0, '2023-02-15 00:00:08.123', 'a9',null,null),
+        (1, 1, '2023-02-15 00:00:09.123', 'a10',null,'b4'),
+        (1, 2, '2023-02-15 00:00:10.123', 'a11','b5',null),
+        (1, 1, '2023-02-15 00:00:11.123', 'a12',null,'b5')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+//                        df.show(false)
+      val actual = df.collect().mkString(";")
+//                        println(actual)
+      assert(result == actual)
+    }
+  }
+  test("interval test") {
+    {
+      val result = "[1,[2023-02-13,a2,877]];[1,[2023-02-20,a6,262809123]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a2','b1','c1'),
+        (1, 1, '2023-02-15 00:00:01',     'a3','b1','c1'),
+        (1, 0, '2023-02-15 00:00:01',     'a4','b1','c1'),
+        (1, 1, '2023-02-20 00:00:05.123', 'a5','b1','c1'),
+        (1, 0, '2023-02-21 00:00:09',     'a6','b1','c1'),
+        (1, 1, '2023-02-21 00:00:18.123', 'a7','b1','c2'),
+        (1, 0, '2023-02-21 01:00:09',     'a8','b1','c1'),
+        (1, 1, '2023-02-24 01:00:18.123', 'a9','b1','c1')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 and dim2 ='b1' then 0
+          when event_id = 1 and dim3 ='c1' then 1
+          else -1 end,
+          null,
+          event_time,
+          'SIMPLE',
+          null,
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+//                  df.show(false)
+      val actual = df.collect().mkString(";")
+//                  println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a2,877]];[1,[2023-02-20,a6,20123]];[1,[2023-02-20,a8,10123]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a2','b1','c1'),
+        (1, 1, '2023-02-15 00:00:01',     'a3','b1','b1'),
+        (1, 0, '2023-02-15 00:00:01',     'a4','c1','c1'),
+        (1, 1, '2023-02-20 00:00:05.123', 'a5','b1','c1'),
+        (1, 0, '2023-02-21 00:00:09',     'a6','b1','c1'),
+        (1, 1, '2023-02-21 00:00:18.123', 'a7','b1','bb1'),
+        (1, 0, '2023-02-21 00:00:20',     'a8','c1','c1'),
+        (1, 1, '2023-02-21 00:00:29.123', 'a9','b1','b1'),
+        (1, 0, '2023-02-21 00:00:30',     'a8',null,'c1'),
+        (1, 1, '2023-02-21 00:00:30.123', 'a8',null,'c1'),
+        (1, 1, '2023-02-21 00:00:31.123', 'a9','b1','b1'),
+        (1, 0, '2023-02-21 00:00:32',     'a8','c1','c1'),
+        (1, 1, '2023-02-21 00:00:33.123', 'a9','b1',null)
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 then 0
+          when event_id = 1 then 1
+          else -1 end,
+          null,
+          event_time,
+          'SIMPLE_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];[1,[2023-02-13,a5,28000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.145', 'a2','b1','c1'),
+        (1, 0, '2023-02-15 00:00:01.234',     'a3','b1','b1'),
+        (1, 1, '2023-02-15 00:00:01.456',     'a3','b1','b1'),
+        (1, 0, '2023-02-15 00:00:02',     'a4','c1','c1'),
+        (1, 0, '2023-02-15 00:00:05.123', 'a5','b1','c1'),
+        (1, 0, '2023-02-15 00:00:33.123', 'a9','b1',null)
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 then 2
+          else -1 end,
+          null,
+          event_time,
+          'REPEAT',
+          null,
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,1111]];[1,[2023-02-13,a2,1855]];[1,[2023-02-13,a6,2000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.145', 'a2','b2','c1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 0, '2023-02-15 00:00:02',     'a4','c1','b2'),
+        (1, 0, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 0, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 0, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 0, '2023-02-15 00:00:07.123', 'a8',null,'b4')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 then 2
+          else -1 end,
+          null,
+          event_time,
+          'REPEAT_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];[1,[2023-02-13,a6,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','c1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b2'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 0, '2023-02-15 00:00:07.123', 'a8',null,'b4')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];" +
+        "[1,[2023-02-13,a6,2000]];[1,[2023-02-13,a11,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','b1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b3'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 1, '2023-02-15 00:00:07.123', 'a8',null,'b4'),
+        (1, 0, '2023-02-15 00:00:08.123', 'a9',null,null),
+        (1, 1, '2023-02-15 00:00:09.123', 'a10',null,'b4'),
+        (1, 2, '2023-02-15 00:00:10.123', 'a11','b5',null),
+        (1, 1, '2023-02-15 00:00:11.123', 'a12',null,'b5')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+  }
 }
 
 object TypedImperativeAggregateSuite {
@@ -1027,10 +1619,10 @@ object TypedImperativeAggregateSuite {
    * in aggregation buffer.
    */
   private case class TypedMax(
-      child: Expression,
-      nullable: Boolean = false,
-      mutableAggBufferOffset: Int = 0,
-      inputAggBufferOffset: Int = 0)
+                               child: Expression,
+                               nullable: Boolean = false,
+                               mutableAggBufferOffset: Int = 0,
+                               inputAggBufferOffset: Int = 0)
     extends TypedImperativeAggregate[MaxValue] with ImplicitCastInputTypes {
 
 
