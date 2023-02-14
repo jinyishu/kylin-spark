@@ -1278,6 +1278,338 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     )
     result.show(false)
   }
+  test("single interval test") {
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];" +
+        "[1,[2023-02-13,a6,2000]];[1,[2023-02-13,a11,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','b1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b3'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 1, '2023-02-15 00:00:07.123', 'a8',null,'b4'),
+        (1, 0, '2023-02-15 00:00:08.123', 'a9',null,null),
+        (1, 1, '2023-02-15 00:00:09.123', 'a10',null,'b4'),
+        (1, 2, '2023-02-15 00:00:10.123', 'a11','b5',null),
+        (1, 1, '2023-02-15 00:00:11.123', 'a12',null,'b5')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+//                        df.show(false)
+      val actual = df.collect().mkString(";")
+//                        println(actual)
+      assert(result == actual)
+    }
+  }
+  test("interval test") {
+    {
+      val result = "[1,[2023-02-13,a2,877]];[1,[2023-02-20,a6,262809123]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a2','b1','c1'),
+        (1, 1, '2023-02-15 00:00:01',     'a3','b1','c1'),
+        (1, 0, '2023-02-15 00:00:01',     'a4','b1','c1'),
+        (1, 1, '2023-02-20 00:00:05.123', 'a5','b1','c1'),
+        (1, 0, '2023-02-21 00:00:09',     'a6','b1','c1'),
+        (1, 1, '2023-02-21 00:00:18.123', 'a7','b1','c2'),
+        (1, 0, '2023-02-21 01:00:09',     'a8','b1','c1'),
+        (1, 1, '2023-02-24 01:00:18.123', 'a9','b1','c1')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 and dim2 ='b1' then 0
+          when event_id = 1 and dim3 ='c1' then 1
+          else -1 end,
+          null,
+          event_time,
+          'SIMPLE',
+          null,
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+//                  df.show(false)
+      val actual = df.collect().mkString(";")
+//                  println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a2,877]];[1,[2023-02-20,a6,20123]];[1,[2023-02-20,a8,10123]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a2','b1','c1'),
+        (1, 1, '2023-02-15 00:00:01',     'a3','b1','b1'),
+        (1, 0, '2023-02-15 00:00:01',     'a4','c1','c1'),
+        (1, 1, '2023-02-20 00:00:05.123', 'a5','b1','c1'),
+        (1, 0, '2023-02-21 00:00:09',     'a6','b1','c1'),
+        (1, 1, '2023-02-21 00:00:18.123', 'a7','b1','bb1'),
+        (1, 0, '2023-02-21 00:00:20',     'a8','c1','c1'),
+        (1, 1, '2023-02-21 00:00:29.123', 'a9','b1','b1'),
+        (1, 0, '2023-02-21 00:00:30',     'a8',null,'c1'),
+        (1, 1, '2023-02-21 00:00:30.123', 'a8',null,'c1'),
+        (1, 1, '2023-02-21 00:00:31.123', 'a9','b1','b1'),
+        (1, 0, '2023-02-21 00:00:32',     'a8','c1','c1'),
+        (1, 1, '2023-02-21 00:00:33.123', 'a9','b1',null)
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 then 0
+          when event_id = 1 then 1
+          else -1 end,
+          null,
+          event_time,
+          'SIMPLE_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];[1,[2023-02-13,a5,28000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.145', 'a2','b1','c1'),
+        (1, 0, '2023-02-15 00:00:01.234',     'a3','b1','b1'),
+        (1, 1, '2023-02-15 00:00:01.456',     'a3','b1','b1'),
+        (1, 0, '2023-02-15 00:00:02',     'a4','c1','c1'),
+        (1, 0, '2023-02-15 00:00:05.123', 'a5','b1','c1'),
+        (1, 0, '2023-02-15 00:00:33.123', 'a9','b1',null)
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 then 2
+          else -1 end,
+          null,
+          event_time,
+          'REPEAT',
+          null,
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,1111]];[1,[2023-02-13,a2,1855]];[1,[2023-02-13,a6,2000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.145', 'a2','b2','c1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 0, '2023-02-15 00:00:02',     'a4','c1','b2'),
+        (1, 0, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 0, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 0, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 0, '2023-02-15 00:00:07.123', 'a8',null,'b4')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 then 2
+          else -1 end,
+          null,
+          event_time,
+          'REPEAT_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];[1,[2023-02-13,a6,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','c1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b2'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 0, '2023-02-15 00:00:07.123', 'a8',null,'b4')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];" +
+        "[1,[2023-02-13,a6,2000]];[1,[2023-02-13,a11,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','b1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b3'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 1, '2023-02-15 00:00:07.123', 'a8',null,'b4'),
+        (1, 0, '2023-02-15 00:00:08.123', 'a9',null,null),
+        (1, 1, '2023-02-15 00:00:09.123', 'a10',null,'b4'),
+        (1, 2, '2023-02-15 00:00:10.123', 'a11','b5',null),
+        (1, 1, '2023-02-15 00:00:11.123', 'a12',null,'b5')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select user_id,explode(seq) as event
+      from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+  }
 }
 
 object TypedImperativeAggregateSuite {
