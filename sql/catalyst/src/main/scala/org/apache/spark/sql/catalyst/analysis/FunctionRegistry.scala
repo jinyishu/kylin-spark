@@ -327,6 +327,7 @@ object FunctionRegistry {
     expression[CompressBitmapContains]("compress_bitmap_contains"),
     expression[CompressGetBitmap]("compress_get_bitmap"),
     expression[Interval]("interval"),
+    expression[Retention]("retention"),
 
     // string functions
     expression[Ascii]("ascii"),

@@ -1610,6 +1610,83 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       assert(result == actual)
     }
   }
+  test("single retention test") {
+    {
+      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];" +
+        "[1,[2023-02-13,a6,2000]];[1,[2023-02-13,a11,1000]]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (3, 1, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (2, 0, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-02 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-03 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-03 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-04 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-05 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-06 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-06 00:00:00.123', 'a1','b1','c1'),
+        (3, 1, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (2, 1, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (2, 0, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (2, 0, '2023-02-01 00:00:00.123', 'a1','b1','c1'),
+        (2, 1, '2023-02-02 00:00:00.123', 'a1','b1','c1'),
+        (2, 1, '2023-02-03 00:00:00.123', 'a1','b1','c1'),
+        (2, 0, '2023-02-03 00:00:00.123', 'a1','b1','c1'),
+        (2, 1, '2023-02-04 00:00:00.123', 'a1','b1','c1'),
+        (2, 1, '2023-02-05 00:00:00.123', 'a1','b1','c1'),
+        (2, 1, '2023-02-06 00:00:00.123', 'a1','b1','c1'),
+        (2, 0, '2023-02-06 00:00:00.123', 'a1','b1','c1')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, retention(
+          case
+          when event_id = 0 then 0
+          when event_id = 1 then 1
+                  else -1 end,
+          null,
+          event_time,
+          null,null,null,'DAY',3,'2023-02-01','2023-02-03'
+        ) seq
+        from tmp0 group by user_id
+      )
+      select
+      agg_date,
+      count(distinct user_id) as total,
+      sum(case when res[0] > 0 then 1 else 0 end) as res0 ,
+      sum(case when res[1] > 0 then 1 else 0 end) as res1 ,
+      sum(case when res[2] > 0 then 1 else 0 end) as res2 ,
+      sum(case when res[3] > 0 then 1 else 0 end) as res3 ,
+      compress_bitmap_build(case when res[0] > 0 then user_id end) as bitmap0 ,
+      compress_bitmap_build(case when res[1] > 0 then user_id end) as bitmap1 ,
+      compress_bitmap_build(case when res[2] > 0 then user_id end) as bitmap2 ,
+      compress_bitmap_build(case when res[3] > 0 then user_id end) as bitmap3
+      from (
+      select
+       user_id,event['agg_date'] agg_date,event['res'] res
+      from (
+      select user_id,explode(seq) as event
+      from tmp1
+      ) tmp2
+      ) tmp3 group by agg_date
+        -- GROUPING SETS ((),(agg_date))
+      order by agg_date asc
+
+    """.stripMargin
+      )
+      df.show(false)
+      //        val actual = df.collect().mkString(";")
+      //                                println(actual)
+      //        assert(result == actual)
+    }
+  }
 }
 
 object TypedImperativeAggregateSuite {
