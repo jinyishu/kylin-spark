@@ -247,7 +247,7 @@ case class Interval(startEventExpr: Expression,
           map(startRel) = event
           break()
         }
-        if (!map.isEmpty) {
+        if (map.nonEmpty) {
           // Judge whether the end has a match, calculate if it has,
           // and store start if it has not
           if (endRel != null) {
@@ -374,7 +374,7 @@ case class Interval(startEventExpr: Expression,
       StructType(Seq(
         StructField("agg_date", StringType),
         StructField("group_info", StringType),
-        StructField("interval", LongType)
+        StructField("interval_ms", LongType)
       )))
     dataTypeValue
   }

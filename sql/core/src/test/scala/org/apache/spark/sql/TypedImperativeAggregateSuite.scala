@@ -220,6 +220,98 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
     Column(max.toAggregateExpression())
   }
 
+  test("single attribution test") {
+    {
+      val colNames = Seq("uid", "eid", "dim1", "dim2", "measure1", "measure2", "ts")
+
+      Seq(
+        (1, 1, null, "foo", 0, 0, 1),
+        (1, 2, "bar", null, 0, 0, 2),
+        (1, 1, "bar", "foo", 0, 0, 3),
+        (1, 3, "bar1", null, 0, 0, 4),
+        (1, 5, "bar1", "foo", 0, 0, 5), // ahead
+        (1, 4, "bar", null, 0, 0, 6),
+        (1, 6, "bar1", "foo", 0, 0, 7), // ahead
+        (1, 5, "bar", "foo", 0, 0, 8), // ahead
+        (1, 6, "bar", "foo", 0, 0, 9), // ahead
+        (1, 7, null, "foo", 100, 0, 10),
+        (1, 2, "bar1", null, 0, 0, 11),
+        (1, 6, "bar1", "foo", 0, 0, 12), // ahead
+        (1, 1, "bar1", "foo", 0, 0, 13),
+        (1, 5, "bar1", "foo", 0, 0, 14), // ahead
+        (1, 7, null, "foo", 100, 0, 15),
+        (1, 7, "bar7", "foo", 100, 0, 1000) // Direct conversion
+      ).toDF(colNames: _*).createOrReplaceTempView("events")
+      val result = "[d,null,null,0,1,0,1,0.0,null];" +
+        "[s1,bar,foo,1,0,1,0,0.0,0.0];" +
+        "[s1,bar1,foo,1,0,1,0,0.0,0.0];" +
+        "[s1,null,foo,1,0,1,0,0.0,0.0];" +
+        "[s2,bar1,null,1,1,1,1,1.0,100.0];" +
+        "[s2,bar,null,1,0,1,0,0.0,0.0];" +
+        "[s3,bar1,null,1,0,1,0,0.0,0.0];" +
+        "[s4,bar,null,1,1,1,1,1.0,100.0]"
+      val sql = "select \n" +
+        "event.name, --  s1 s2 s3 s4 d, d -> Direct conversion \n" +
+        "event.groupingInfos[0] by1, -- maybe null\n" +
+        "event.groupingInfos[1] by2,-- maybe null\n" +
+        "sum(case when event.contrib = -1 then event.count else 0 end) count_pv_all, \n" +
+        "sum(\n" +
+        "case when event.contrib > -1 then event.count else 0 end \n" +
+        ") count_pv_valid,  \n" +
+        "count(\n" +
+        "distinct case when event.contrib = -1 then uid else null end\n" +
+        ") count_uv_all,  \n" +
+        "count(\n" +
+        "distinct case when event.contrib > -1 then uid else null end\n" +
+        ") count_uv_valid, \n" +
+        "sum(case when event.contrib > -1 then event.contrib else 0 end) sum_contrib,  \n" +
+        "sum(\n" +
+        "case when event.contrib > -1 then event.measureContrib[0] else 0 end \n" +
+        ") sum_measure_contrib -- maybe null \n" +
+        "from ( \n" +
+        "select uid, explode(at) as event from (\n" +
+        "select \n" +
+        "uid, \n" +
+        "attribution(\n" +
+        "100, \n" +
+        "ts, \n" +
+        "case \n" +
+        "when eid=1 then 's1' \n" +
+        "when eid=2 then 's2' \n" +
+        "when eid=3 then 's3' \n" +
+        "when eid=4 then 's4' else null end  , \n" +
+        "case when eid=7 then 't7' else null end  ,  \n" +
+        "case \n" +
+        "when eid=5 then 'a5'\n" +
+        "when eid=6 then 'a6' else null end  , -- must start with a \n" +
+        "'TARGET_TO_AHEAD_TO_SOURCE',  -- NONE AHEAD_ONLY TARGET_TO_SOURCE TARGET_TO_AHEAD\n" +
+        "array(  \n" +
+        "map('t7', dim2, 'a5', dim2),\n" +
+        "map('t7', dim2, 'a6', dim2),\n" +
+        "map('a5', dim1, 's1', dim1),\n" +
+        "map('a5', dim1, 's2', dim1),\n" +
+        "map('a5', dim1, 's3', dim1),\n" +
+        "map('a5', dim1, 's4', dim1),\n" +
+        "map('a6', dim1, 's1', dim1),\n" +
+        "map('a6', dim1, 's2', dim1),\n" +
+        "map('a6', dim1, 's3', dim1),\n" +
+        "map('a6', dim1, 's4', dim1)\n" +
+        "),\n" +
+        "array(measure1),   \n" +
+        "'LAST', -- FIRST, LAST, LINEAR, POSITION, DECAY\n" +
+        "array(dim1,dim2) \n" +
+        ") as at \n" +
+        "from events group by uid) \n" +
+        ") group by 1,2,3 order by name,count_pv_all"
+//      println(sql)
+      val df = spark.sql(sql)
+      // df.show(false)
+      val actual = df.collect().mkString(";")
+//       println(actual)
+      assert(result == actual)
+    }
+  }
+
   test("test attribution") {
     val oneWeek = 604800000 // 7 * 60 * 60 * 24 * 1000
     val colNames = Seq("uid", "eid", "dim1", "dim2", "measure1", "measure2", "ts")
@@ -516,6 +608,93 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       //    println(actual)
       assert(result == actual)
     }
+    {
+      Seq(
+        (1, 1, null, "foo", 0, 0, 1),
+        (1, 2, "bar", null, 0, 0, 2),
+        (1, 1, "bar", "foo", 0, 0, 3),
+        (1, 3, "bar1", null, 0, 0, 4),
+        (1, 5, "bar1", "foo", 0, 0, 5), // ahead
+        (1, 4, "bar", null, 0, 0, 6),
+        (1, 6, "bar1", "foo", 0, 0, 7), // ahead
+        (1, 5, "bar", "foo", 0, 0, 8), // ahead
+        (1, 6, "bar", "foo", 0, 0, 9), // ahead
+        (1, 7, null, "foo", 100, 0, 10),
+        (1, 2, "bar1", null, 0, 0, 11),
+        (1, 6, "bar1", "foo", 0, 0, 12), // ahead
+        (1, 1, "bar1", "foo", 0, 0, 13),
+        (1, 5, "bar1", "foo", 0, 0, 14), // ahead
+        (1, 7, null, "foo", 100, 0, 15),
+        (1, 7, "bar7", "foo", 100, 0, 1000) // Direct conversion
+      ).toDF(colNames: _*).createOrReplaceTempView("events")
+      val result = "[d,null,null,0,1,0,1,0.0,null];" +
+        "[s1,bar,foo,1,0,1,0,0.0,0.0];" +
+        "[s1,bar1,foo,1,0,1,0,0.0,0.0];" +
+        "[s1,null,foo,1,0,1,0,0.0,0.0];" +
+        "[s2,bar1,null,1,1,1,1,1.0,100.0];" +
+        "[s2,bar,null,1,0,1,0,0.0,0.0];" +
+        "[s3,bar1,null,1,0,1,0,0.0,0.0];" +
+        "[s4,bar,null,1,1,1,1,1.0,100.0]"
+      val sql = "select \n" +
+        "event.name, --  s1 s2 s3 s4 d, d -> Direct conversion \n" +
+        "event.groupingInfos[0] by1, -- maybe null\n" +
+        "event.groupingInfos[1] by2,-- maybe null\n" +
+        "sum(case when event.contrib = -1 then event.count else 0 end) count_pv_all, \n" +
+        "sum(\n" +
+        "case when event.contrib > -1 then event.count else 0 end \n" +
+        ") count_pv_valid,  \n" +
+        "count(\n" +
+        "distinct case when event.contrib = -1 then uid else null end\n" +
+        ") count_uv_all,  \n" +
+        "count(\n" +
+        "distinct case when event.contrib > -1 then uid else null end\n" +
+        ") count_uv_valid, \n" +
+        "sum(case when event.contrib > -1 then event.contrib else 0 end) sum_contrib,  \n" +
+        "sum(\n" +
+        "case when event.contrib > -1 then event.measureContrib[0] else 0 end \n" +
+        ") sum_measure_contrib -- maybe null \n" +
+        "from ( \n" +
+        "select uid, explode(at) as event from (\n" +
+        "select \n" +
+        "uid, \n" +
+        "attribution(\n" +
+        "100, \n" +
+        "ts, \n" +
+        "case \n" +
+        "when eid=1 then 's1' \n" +
+        "when eid=2 then 's2' \n" +
+        "when eid=3 then 's3' \n" +
+        "when eid=4 then 's4' else null end  , \n" +
+        "case when eid=7 then 't7' else null end  ,  \n" +
+        "case \n" +
+        "when eid=5 then 'a5'\n" +
+        "when eid=6 then 'a6' else null end  , -- must start with a \n" +
+        "'TARGET_TO_AHEAD_TO_SOURCE',  -- NONE AHEAD_ONLY TARGET_TO_SOURCE TARGET_TO_AHEAD\n" +
+        "array(  \n" +
+        "map('t7', dim2, 'a5', dim2),\n" +
+        "map('t7', dim2, 'a6', dim2),\n" +
+        "map('a5', dim1, 's1', dim1),\n" +
+        "map('a5', dim1, 's2', dim1),\n" +
+        "map('a5', dim1, 's3', dim1),\n" +
+        "map('a5', dim1, 's4', dim1),\n" +
+        "map('a6', dim1, 's1', dim1),\n" +
+        "map('a6', dim1, 's2', dim1),\n" +
+        "map('a6', dim1, 's3', dim1),\n" +
+        "map('a6', dim1, 's4', dim1)\n" +
+        "),\n" +
+        "array(measure1),   \n" +
+        "'LAST', -- FIRST, LAST, LINEAR, POSITION, DECAY\n" +
+        "array(dim1,dim2) \n" +
+        ") as at \n" +
+        "from events group by uid) \n" +
+        ") group by 1,2,3 order by name,count_pv_all"
+      //      println(sql)
+      val df = spark.sql(sql)
+      // df.show(false)
+      val actual = df.collect().mkString(";")
+      //       println(actual)
+      assert(result == actual)
+    }
   }
 
   private def buildSource(eid: Seq[Int], comma: Boolean = true): String = {
@@ -540,43 +719,62 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
 
   test("single window funnel test") {
     {
-      val result = "[1,2,a1,b5,c6]"
+      val result = "[1,3,10,10,20,30,21,20,false,true]"
       val df = spark.sql(
         """
-          with tmp0 as (
-            select * from values
-            (1, 0, 1, 'a1','b1','c1'),
-            (1, 1, 3, 'a1','b3','c3'),
-            (1, 0, 4, 'a4','b30','c4'),
-            (1, 1, 5, 'a1','b5','c5'),
-            (1, 0, 6, 'a6','b5','c6')
-            AS test(user_id,event_id,event_time,dim0,dim1,dim2)
+      with tmp0 as (
+        select * from values
+        (1, 0, 10, '10', '10', '10', '10'),
+        (1, 1, 20, '10', '20', '20', '20'),
+        (1, 1, 21, '10', '20', '21', '21'),
+        (1, 2, 30, '30', '20', '30', '30'),
+        (1, 2, 31, '30', '20', '30', '31'),
+        (1, 3, 40, '40', '40', '60', '40'),
+        (1, 1, 50, '10', '50', '50', '50'),
+        (1, 2, 60, '60', '50', '60', '60'),
+        (1, 3, 70, '70', '70', '30', '70'),
+        (1, 3, 80, '80', '80', '30', '80')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+      ),
+      tmp1 as (
+        select user_id, window_funnel(
+          100,-- window
+          4,
+          'SIMPLE_REL',
+          event_time,
+          tmp0.dim4,
+          case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+          else '-1' end,
+          struct(
+            struct('NONE',dim1),
+            struct(dim1,dim2),
+            struct(dim2,dim3),
+            struct(dim3,'NONE')
           ),
-          tmp1 as (
-            select user_id, window_funnel(
-              6,
-              3,
-              'REPEAT_REL',
-              event_time,
-              tmp0.dim0,
-              case when event_id = 0 then '0,2'
-               when event_id = 1 then '1'
-              else '-1' end,
-              struct(struct('NONE',dim0),
-                    struct(dim0,dim1),
-                    struct(dim1,'NONE')),
-              struct(struct(1, dim1),struct(2, dim2))
-            ) seq
-            from tmp0 group by user_id
+          struct(
+            struct(0, dim1),struct(1, dim1),struct(2, dim2),struct(3, dim3)
+            ,struct('user', dim4),struct('user', dim2)
+            ,struct('user', case when event_time > 50 then 'true' else 'false' end as ug1)
+            ,struct('user', case when event_time < 50 then 'true' else 'false' end as ug2)
           )
-          select user_id,seq['max_step'] max_step ,seq['0dim0'] 0dim0 ,
-          seq['1dim1'] 1dim1 ,seq['2dim2'] 2dim2
-          from tmp1
-        """.stripMargin
+        ) seq
+        from tmp0
+        group by user_id
       )
-      //      df.show(false)
+      select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+      seq['1dim1'] 1dim1, seq['2dim2'] 2dim2, seq['3dim3'] 3dim3,
+      seq['userdim4'] userdim4,seq['userdim2'] userdim2,
+      seq['userug1'] userug1,seq['userug2'] userug2
+      from tmp1
+      """.stripMargin
+      )
+//            df.show(false)
       val actual = df.collect().mkString(";")
-      //      println(actual)
+//            println(actual)
       assert(result == actual)
     }
   }
@@ -1200,6 +1398,65 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       //      println(actual)
       assert(result == actual)
     }
+    {
+      val result = "[1,3,10,10,20,30,21,20,false,true]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select * from values
+        (1, 0, 10, '10', '10', '10', '10'),
+        (1, 1, 20, '10', '20', '20', '20'),
+        (1, 1, 21, '10', '20', '21', '21'),
+        (1, 2, 30, '30', '20', '30', '30'),
+        (1, 2, 31, '30', '20', '30', '31'),
+        (1, 3, 40, '40', '40', '60', '40'),
+        (1, 1, 50, '10', '50', '50', '50'),
+        (1, 2, 60, '60', '50', '60', '60'),
+        (1, 3, 70, '70', '70', '30', '70'),
+        (1, 3, 80, '80', '80', '30', '80')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3,dim4)
+      ),
+      tmp1 as (
+        select user_id, window_funnel(
+          100,-- window
+          4,
+          'SIMPLE_REL',
+          event_time,
+          tmp0.dim4,
+          case
+            when event_id = 0 then '0'
+            when event_id = 1 then '1'
+            when event_id = 2 then '2'
+            when event_id = 3 then '3'
+          else '-1' end,
+          struct(
+            struct('NONE',dim1),
+            struct(dim1,dim2),
+            struct(dim2,dim3),
+            struct(dim3,'NONE')
+          ),
+          struct(
+            struct(0, dim1),struct(1, dim1),struct(2, dim2),struct(3, dim3)
+            ,struct('user', dim4),struct('user', dim2)
+            ,struct('user', case when event_time > 50 then 'true' else 'false' end as ug1)
+            ,struct('user', case when event_time < 50 then 'true' else 'false' end as ug2)
+          )
+        ) seq
+        from tmp0
+        group by user_id
+      )
+      select user_id,seq['max_step'] max_step ,seq['0dim4'] 0dim4,
+      seq['1dim1'] 1dim1, seq['2dim2'] 2dim2, seq['3dim3'] 3dim3,
+      seq['userdim4'] userdim4,seq['userdim2'] userdim2,
+      seq['userug1'] userug1,seq['userug2'] userug2
+      from tmp1
+      """.stripMargin
+      )
+      //            df.show(false)
+      val actual = df.collect().mkString(";")
+      //            println(actual)
+      assert(result == actual)
+    }
 
   }
   test("test compress bitmap build") {
@@ -1280,8 +1537,10 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
   }
   test("single interval test") {
     {
-      val result = "[1,[2023-02-13,a1,22]];[1,[2023-02-13,a3,766]];" +
-        "[1,[2023-02-13,a6,2000]];[1,[2023-02-13,a11,1000]]"
+      val result = "[2023-02-13,a1,22];" +
+        "[2023-02-13,a3,766];" +
+        "[2023-02-13,a6,2000];" +
+        "[2023-02-13,a11,1000]"
       val df = spark.sql(
         """
       with tmp0 as (
@@ -1320,9 +1579,14 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
           'WEEK'
         ) seq
         from tmp0 group by user_id
-      )
-      select user_id,explode(seq) as event
-      from tmp1
+      ),
+        tmp2 as(
+        select user_id,explode(seq) as event
+        from tmp1
+        )
+        select
+         event.agg_date,event.group_info,event.interval_ms
+        from tmp2
     """.stripMargin
       )
 //                        df.show(false)
@@ -1602,6 +1866,64 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       )
       select user_id,explode(seq) as event
       from tmp1
+    """.stripMargin
+      )
+      //                        df.show(false)
+      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      assert(result == actual)
+    }
+    {
+      val result = "[2023-02-13,a1,22];" +
+        "[2023-02-13,a3,766];" +
+        "[2023-02-13,a6,2000];" +
+        "[2023-02-13,a11,1000]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,dim3
+         from values
+        (1, 1, '2023-02-14 00:00:00.123', 'a1','b1','c1'),
+        (1, 0, '2023-02-15 00:00:00.123', 'a1','b1','c1'),
+        (1, 1, '2023-02-15 00:00:00.145', 'a2','b2','b1'),
+        (1, 0, '2023-02-15 00:00:01.234', 'a3','b3','b1'),
+        (1, 2, '2023-02-15 00:00:02',     'a4','c1','b3'),
+        (1, 1, '2023-02-15 00:00:03.123', 'a5',null,'c1'),
+        (1, 2, '2023-02-15 00:00:05.123', 'a6','b4',null),
+        (1, 1, '2023-02-15 00:00:06.123', 'a7','b5',null),
+        (1, 1, '2023-02-15 00:00:07.123', 'a8',null,'b4'),
+        (1, 0, '2023-02-15 00:00:08.123', 'a9',null,null),
+        (1, 1, '2023-02-15 00:00:09.123', 'a10',null,'b4'),
+        (1, 2, '2023-02-15 00:00:10.123', 'a11','b5',null),
+        (1, 1, '2023-02-15 00:00:11.123', 'a12',null,'b5')
+        AS test(user_id,event_id,event_time,dim1,dim2,dim3)
+      ),
+      tmp1 as (
+        select user_id, interval(
+          case
+          when event_id = 0 or event_id = 2 then 0
+          else -1 end,
+          case
+          when event_id = 2 or event_id = 1 then 1
+          else -1 end,
+          event_time,
+          'NOT_REPEAT_VIRTUAL_REL',
+          array(dim2,dim3),
+          dim1,
+          'START',
+          'WEEK'
+        ) seq
+        from tmp0 group by user_id
+      ),
+        tmp2 as(
+        select user_id,explode(seq) as event
+        from tmp1
+        )
+        select
+         event.agg_date,event.group_info,event.interval_ms
+        from tmp2
     """.stripMargin
       )
       //                        df.show(false)

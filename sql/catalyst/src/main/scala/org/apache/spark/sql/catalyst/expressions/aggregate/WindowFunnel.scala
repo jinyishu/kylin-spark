@@ -35,7 +35,7 @@ import org.apache.spark.unsafe.types.UTF8String
  * @param evtNumLit number of events
  * @param modelTypeLit WindowFunnel type ,SIMPLE,SIMPLE_REL,REPEAT,REPEAT_REL
  * @param eventTsExpr event ts in long
- * @param baseGroupExpr start event base group
+ * @param baseGroupExpr start event base group ,day group
  * @param evtConds expr to return event id (starting from 0)
  * @param eventRelations expr to return related dim values
  * @param groupExpr expr to return stepId attach props array
@@ -203,13 +203,18 @@ case class WindowFunnel(windowLit: Expression,
       for (i <- groupDimNames.indices) {
         val dimName = groupDimNames.apply(i)
         val dimValues = stepDimValues.get(i, ArrayType(StringType)).asInstanceOf[GenericInternalRow]
-        val step = dimValues.get(0, StringType).toString.toInt
+        val stepStr = dimValues.get(0, StringType).toString
         val dimValue = dimValues.get(1, StringType)
         val dimValueStr = if (dimValue == null) "null" else dimValue.toString
-        if (isRepeat) {
-          if (eids.contains(step)) groupDim.put(dimName, dimValueStr)
+        if(stepStr.startsWith("user")) { // user or user_group
+          groupDim.put(dimName, dimValueStr)
         } else {
-          if (eid == step) groupDim.put(dimName, dimValueStr)
+          val step = stepStr.toInt
+          if (isRepeat) {
+            if (eids.contains(step)) groupDim.put(dimName, dimValueStr)
+          } else {
+            if (eid == step) groupDim.put(dimName, dimValueStr)
+          }
         }
       }
     }
@@ -264,7 +269,7 @@ case class WindowFunnel(windowLit: Expression,
     // Set maxStepEvent grouping information
     val maxStepEventId = currentMaxStepEvent.maxStep.toString
     for ((x, y) <- maxStepEvent.groupDim) {
-      if (x.startsWith(maxStepEventId)) {
+      if (x.startsWith(maxStepEventId) || x.startsWith("user")) {
         currentMaxStepEvent.resultGroupDim.put(x, y)
       }
     }
@@ -289,7 +294,7 @@ case class WindowFunnel(windowLit: Expression,
 
       for ((x, y) <- closerEvent.groupDim) {
         // i.toString： Grouping dimension of current step id
-        if (x.startsWith(i.toString)) {
+        if (x.startsWith(i.toString) || x.startsWith("user")) {
           currentMaxStepEvent.resultGroupDim.put(x, y)
         }
       }
@@ -400,7 +405,7 @@ case class WindowFunnel(windowLit: Expression,
               if (event.groupDim != null) {
                 val nextStepString = nextMaxStep.toString
                 for ((x, y) <- event.groupDim) {
-                  if (x.startsWith(nextStepString)) {
+                  if (x.startsWith(nextStepString) || x.startsWith("user")) {
                     startEvent.resultGroupDim.put(x, y)
                   }
                 }
@@ -453,7 +458,7 @@ case class WindowFunnel(windowLit: Expression,
                 if (event.groupDim != null) {
                   val nextStepString = nextMaxStep.toString
                   for ((x, y) <- event.groupDim) {
-                    if (x.startsWith(nextStepString)) {
+                    if (x.startsWith(nextStepString)  || x.startsWith("user")) {
                       startEvent.resultGroupDim.put(x, y)
                     }
                   }
