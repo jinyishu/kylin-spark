@@ -45,7 +45,7 @@ case class CompressBitmapContains(column: Expression, encodeBitmap: Expression)
     val literalValue = right.asInstanceOf[Literal].value
     val utf8Bitmap = literalValue.asInstanceOf[UTF8String].toString
     try {
-      if (utf8Bitmap.startsWith("H4sIAAA")) { // gzip compress
+      if (utf8Bitmap.startsWith("gzip:")) { // gzip compress
         CompressBitmapUtils.compressEncoderStringToBitmap(utf8Bitmap)
       } else {
         val bitmapByte: Array[Byte] = java.util.Base64.getDecoder.decode(utf8Bitmap)
@@ -211,11 +211,11 @@ object CompressBitmapUtils{
   def bitmapToCompressEncoderString(bitmap: Roaring64NavigableMap): String = {
     val bitmap2byte = serializeBitmapToBytes(bitmap)
     val compressed = compressByte(bitmap2byte)
-    java.util.Base64.getEncoder.encodeToString(compressed)
+    "gzip:" + java.util.Base64.getEncoder.encodeToString(compressed)
   }
 
   def compressEncoderStringToBitmap(src: String): Roaring64NavigableMap = {
-    val compressByte: Array[Byte] = java.util.Base64.getDecoder.decode(src)
+    val compressByte: Array[Byte] = java.util.Base64.getDecoder.decode(src.substring(5))
     val decompressStringByte = decompressByte(compressByte)
     serializeBytesToBitmap(decompressStringByte)
   }
