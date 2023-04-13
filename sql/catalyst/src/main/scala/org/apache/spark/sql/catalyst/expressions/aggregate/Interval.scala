@@ -21,11 +21,9 @@ import java.nio.ByteBuffer
 import java.time.{DayOfWeek, Instant, LocalDateTime, ZoneId}
 import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
-
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.control.Breaks.{break, breakable}
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Cast, Expression}
@@ -33,6 +31,8 @@ import org.apache.spark.sql.catalyst.expressions.objects.SerializerSupport
 import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
+
+import java.util.Locale
 
 /**
  * calculate event interval
@@ -103,8 +103,8 @@ case class Interval(startEventExpr: Expression,
   val DATE_WEEK = "WEEK"
   val DATE_MONTH = "MONTH"
 
-  lazy val dayFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
-  lazy val monthFormatter = DateTimeFormatter.ofPattern("yyyy-MM")
+  lazy val dayFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.CHINESE)
+  lazy val monthFormatter = DateTimeFormatter.ofPattern("yyyy-MM", Locale.CHINESE)
 
   lazy val viewType: String = viewTypeLitExpr.eval().toString
 
