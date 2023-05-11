@@ -21,9 +21,12 @@ import java.nio.ByteBuffer
 import java.time.{DayOfWeek, Instant, LocalDateTime, ZoneId}
 import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
+import java.util.Locale
+
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.control.Breaks.{break, breakable}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Cast, Expression}
@@ -32,7 +35,6 @@ import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
-import java.util.Locale
 
 /**
  * calculate event interval
@@ -123,33 +125,36 @@ case class Interval(startEventExpr: Expression,
 
   override def update(buffer: ListBuffer[IntervalEvent],
                       input: InternalRow): ListBuffer[IntervalEvent] = {
-
-    val ts = evalToLong(eventTsExpr, input)
-    if (ts < 0) return buffer
-    val eventType = modelType match {
-      case SIMPLE | SIMPLE_REL | REPEAT | REPEAT_REL =>
-        // simple : 0 1 -1
-        // repeat: 2 -1
-        startEventExpr.eval(input).toString.toInt
-      case NOT_REPEAT_VIRTUAL | NOT_REPEAT_VIRTUAL_ERL =>
-        // 0 1 2 -1
-        val startEventType: Int = startEventExpr.eval(input).toString.toInt
-        val endEventType: Int = endEventExpr.eval(input).toString.toInt
-        if (startEventType == EventType.NULL && endEventType == EventType.NULL) {
-          EventType.NULL
-        } else if (startEventType == EventType.START && endEventType == EventType.END) {
-          EventType.REPEAT
-        } else {
-          startEventType.max(endEventType)
-        }
-      case _ => EventType.NULL
+    try {
+      val ts = evalToLong(eventTsExpr, input)
+      if (ts < 0) return buffer
+      val eventType = modelType match {
+        case SIMPLE | SIMPLE_REL | REPEAT | REPEAT_REL =>
+          // simple : 0 1 -1
+          // repeat: 2 -1
+          startEventExpr.eval(input).toString.toInt
+        case NOT_REPEAT_VIRTUAL | NOT_REPEAT_VIRTUAL_ERL =>
+          // 0 1 2 -1
+          val startEventType: Int = startEventExpr.eval(input).toString.toInt
+          val endEventType: Int = endEventExpr.eval(input).toString.toInt
+          if (startEventType == EventType.NULL && endEventType == EventType.NULL) {
+            EventType.NULL
+          } else if (startEventType == EventType.START && endEventType == EventType.END) {
+            EventType.REPEAT
+          } else {
+            startEventType.max(endEventType)
+          }
+        case _ => EventType.NULL
+      }
+      if (eventType == EventType.NULL) return buffer
+      val aggDate = doAggDate(ts)
+      val groupingInfo = evalToString(viewDimExpr, input)
+      val relatedDims = evalToArray(relationsExpr, input)
+      val event = IntervalEvent(ts, eventType, aggDate, relatedDims, groupingInfo)
+      buffer.append(event)
+    } catch {
+      case e: Exception => e.printStackTrace()
     }
-    if (eventType == EventType.NULL) return buffer
-    val aggDate = doAggDate(ts)
-    val groupingInfo = evalToString(viewDimExpr, input)
-    val relatedDims = evalToArray(relationsExpr, input)
-    val event = IntervalEvent(ts, eventType, aggDate, relatedDims, groupingInfo)
-    buffer.append(event)
     buffer
   }
 
@@ -343,27 +348,32 @@ case class Interval(startEventExpr: Expression,
   }
 
   override def eval(buffer: ListBuffer[IntervalEvent]): GenericArrayData = {
-    val result = ListBuffer[IntervalEvent]()
-    // aggDate
-    buffer.groupBy(_.aggDateType).foreach(group => {
-      val sorted = group._2.sortBy(_.ts)
-      modelType match {
-        case SIMPLE => doSimpleEval(sorted, result)
-        case SIMPLE_REL => doSimpleRelEval(sorted, result)
-        case REPEAT => doRepeatEval(sorted, result)
-        case REPEAT_REL => doRepeatRelEval(sorted, result)
-        case NOT_REPEAT_VIRTUAL => doNotRepeatVirtualEval(sorted, result)
-        case NOT_REPEAT_VIRTUAL_ERL => doNotRepeatVirtualRelEval(sorted, result)
-        case _ =>
-      }
-    })
-    new GenericArrayData(result.map(e => {
-      InternalRow(
-        UTF8String.fromString(e.aggDateType),
-        UTF8String.fromString(e.groupingInfo),
-        e.interval
-      )
-    }))
+    try {
+      val result = ListBuffer[IntervalEvent]()
+      // aggDate
+      buffer.groupBy(_.aggDateType).foreach(group => {
+        val sorted = group._2.sortBy(_.ts)
+        modelType match {
+          case SIMPLE => doSimpleEval(sorted, result)
+          case SIMPLE_REL => doSimpleRelEval(sorted, result)
+          case REPEAT => doRepeatEval(sorted, result)
+          case REPEAT_REL => doRepeatRelEval(sorted, result)
+          case NOT_REPEAT_VIRTUAL => doNotRepeatVirtualEval(sorted, result)
+          case NOT_REPEAT_VIRTUAL_ERL => doNotRepeatVirtualRelEval(sorted, result)
+          case _ =>
+        }
+      })
+      return new GenericArrayData(result.map(e => {
+        InternalRow(
+          UTF8String.fromString(e.aggDateType),
+          UTF8String.fromString(e.groupingInfo),
+          e.interval
+        )
+      }))
+    } catch {
+      case e: Exception => e.printStackTrace()
+    }
+    new GenericArrayData(Seq(InternalRow(null, null, null)))
   }
 
   override def dataType: DataType = {

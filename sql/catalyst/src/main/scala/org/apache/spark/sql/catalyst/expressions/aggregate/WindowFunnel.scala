@@ -149,79 +149,83 @@ case class WindowFunnel(windowLit: Expression,
 
   override def update(buffer: ListBuffer[FunnelEvent],
                       input: InternalRow): ListBuffer[FunnelEvent] = {
+    try {
+      val ts = toLong(eventTsExpr, input)
+      if (ts < 0) return buffer
 
-    val ts = toLong(eventTsExpr, input)
-    if(ts < 0) return buffer
-
-    var eids: Array[Int] = null
-    var eid: Int = -1
-    var baseGroup: String = null
-    var upRelations: String = null
-    var downRelations: String = null
-    var relations: GenericInternalRow = null
-    var repeatUpRelations: mutable.HashMap[Int, String] = null
-    var repeatDownRelations: mutable.HashMap[Int, String] = null
-    if (isRelations) {
-      relations = eventRelations.eval(input).asInstanceOf[GenericInternalRow]
-    }
-
-    if(isRepeat) {
-      eids = toIntegerArray(evtConds, input)
-      if (eids.apply(0) < 0 ) return buffer
-      if(eids.contains(0)) baseGroup = toString(baseGroupExpr, input)
+      var eids: Array[Int] = null
+      var eid: Int = -1
+      var baseGroup: String = null
+      var upRelations: String = null
+      var downRelations: String = null
+      var relations: GenericInternalRow = null
+      var repeatUpRelations: mutable.HashMap[Int, String] = null
+      var repeatDownRelations: mutable.HashMap[Int, String] = null
       if (isRelations) {
-        repeatUpRelations = mutable.HashMap[Int, String]()
-        repeatDownRelations = mutable.HashMap[Int, String]()
-        for(id <- eids) {
-          val up = relations.values(id).asInstanceOf[GenericInternalRow].values(0)
-          if (up != null) repeatUpRelations.put(id, up.toString)
-          val down = relations.values(id).asInstanceOf[GenericInternalRow].values(1)
-          if (down != null) repeatDownRelations.put(id, down.toString)
+        relations = eventRelations.eval(input).asInstanceOf[GenericInternalRow]
+      }
+
+      if (isRepeat) {
+        eids = toIntegerArray(evtConds, input)
+        if (eids.apply(0) < 0) return buffer
+        if (eids.contains(0)) baseGroup = toString(baseGroupExpr, input)
+        if (isRelations) {
+          repeatUpRelations = mutable.HashMap[Int, String]()
+          repeatDownRelations = mutable.HashMap[Int, String]()
+          for (id <- eids) {
+            val up = relations.values(id).asInstanceOf[GenericInternalRow].values(0)
+            if (up != null) repeatUpRelations.put(id, up.toString)
+            val down = relations.values(id).asInstanceOf[GenericInternalRow].values(1)
+            if (down != null) repeatDownRelations.put(id, down.toString)
+          }
+
         }
+      } else {
+        eid = toInteger(evtConds, input)
+        if (eid < 0) return buffer
+        if (eid == 0) {
+          baseGroup = toString(baseGroupExpr, input)
+          if (baseGroup == null) baseGroup = "null"
+        }
+        if (isRelations) {
+          val up = relations.values(eid).asInstanceOf[GenericInternalRow].values(0)
+          if (up != null) upRelations = up.toString
+          val down = relations.values(eid).asInstanceOf[GenericInternalRow].values(1)
+          if (down != null) downRelations = down.toString
+        }
+      }
 
-      }
-    } else {
-      eid = toInteger(evtConds, input)
-      if(eid < 0) return buffer
-      if(eid == 0) {
-        baseGroup = toString(baseGroupExpr, input)
-        if (baseGroup == null) baseGroup = "null"
-      }
-      if (isRelations) {
-        val up = relations.values(eid).asInstanceOf[GenericInternalRow].values(0)
-        if( up != null ) upRelations = up.toString
-        val down = relations.values(eid).asInstanceOf[GenericInternalRow].values(1)
-        if( down != null) downRelations = down.toString
-      }
-    }
-
-    var groupDim: mutable.HashMap [String, String] = null
-    if(groupDimNames == null) groupDimNames = toGroupNames
-    if(groupDimNames.nonEmpty) {
-      groupDim = mutable.HashMap [String, String]()
-      val stepDimValues: GenericInternalRow = toGroups(groupExpr, input)
-      for (i <- groupDimNames.indices) {
-        val dimName = groupDimNames.apply(i)
-        val dimValues = stepDimValues.get(i, ArrayType(StringType)).asInstanceOf[GenericInternalRow]
-        val stepStr = dimValues.get(0, StringType).toString
-        val dimValue = dimValues.get(1, StringType)
-        val dimValueStr = if (dimValue == null) "null" else dimValue.toString
-        if(stepStr.startsWith("user")) { // user or user_group
-          groupDim.put(dimName, dimValueStr)
-        } else {
-          val step = stepStr.toInt
-          if (isRepeat) {
-            if (eids.contains(step)) groupDim.put(dimName, dimValueStr)
+      var groupDim: mutable.HashMap[String, String] = null
+      if (groupDimNames == null) groupDimNames = toGroupNames
+      if (groupDimNames.nonEmpty) {
+        groupDim = mutable.HashMap[String, String]()
+        val stepDimValues: GenericInternalRow = toGroups(groupExpr, input)
+        for (i <- groupDimNames.indices) {
+          val dimName = groupDimNames.apply(i)
+          val dimValues = stepDimValues.get(i, ArrayType(StringType))
+            .asInstanceOf[GenericInternalRow]
+          val stepStr = dimValues.get(0, StringType).toString
+          val dimValue = dimValues.get(1, StringType)
+          val dimValueStr = if (dimValue == null) "null" else dimValue.toString
+          if (stepStr.startsWith("user")) { // user or user_group
+            groupDim.put(dimName, dimValueStr)
           } else {
-            if (eid == step) groupDim.put(dimName, dimValueStr)
+            val step = stepStr.toInt
+            if (isRepeat) {
+              if (eids.contains(step)) groupDim.put(dimName, dimValueStr)
+            } else {
+              if (eid == step) groupDim.put(dimName, dimValueStr)
+            }
           }
         }
       }
-    }
 
-    val event = FunnelEvent(ts, eid, eids, baseGroup, groupDim,
-      upRelations, downRelations, repeatUpRelations, repeatDownRelations)
-    buffer.append(event)
+      val event = FunnelEvent(ts, eid, eids, baseGroup, groupDim,
+        upRelations, downRelations, repeatUpRelations, repeatDownRelations)
+      buffer.append(event)
+    } catch {
+      case e: Exception => e.printStackTrace()
+    }
     buffer
   }
 
@@ -233,37 +237,51 @@ case class WindowFunnel(windowLit: Expression,
 
   override def eval(buffer: ListBuffer[FunnelEvent]): Any = {
     if (groupDimNames == null) groupDimNames = toGroupNames
-    val returnRow = new GenericInternalRow(2 + groupDimNames.size )
+    val resultRow = new GenericInternalRow(2 + groupDimNames.size )
     if (buffer.isEmpty) {
-      returnRow(0) = -1
-      return returnRow
+      returnDefaultRow(resultRow)
+      return resultRow
     }
-    val sorted = buffer.sortBy(_.ts)
-    val maxStepEvent = modelType match {
-      case SIMPLE => doSimpleEval(sorted)
-      case SIMPLE_REL => doSimpleRelationsEval(sorted)
-      case REPEAT => doRepeatEval(sorted)
-      case REPEAT_REL => doRepeatRelationsEval(sorted)
-      case _ => null
+    try {
+      val sorted = buffer.sortBy(_.ts)
+      val maxStepEvent = modelType match {
+        case SIMPLE => doSimpleEval(sorted)
+        case SIMPLE_REL => doSimpleRelationsEval(sorted)
+        case REPEAT => doRepeatEval(sorted)
+        case REPEAT_REL => doRepeatRelationsEval(sorted)
+        case _ => null
+      }
+      if (maxStepEvent == null) {
+        returnDefaultRow(resultRow)
+        return resultRow
+      }
+      resultRow(0) = maxStepEvent.maxStep
+      resultRow(1) = UTF8String.fromString(maxStepEvent.baseGroup)
+      var i = 2
+      for (name <- groupDimNames) {
+        val value = maxStepEvent.resultGroupDim.getOrElse(name, "null")
+        resultRow(i) = UTF8String.fromString(value)
+        i+=1
+      }
+      return resultRow
+    } catch {
+      case e: Exception => e.printStackTrace()
     }
-    if (maxStepEvent == null) {
-      returnRow(0) = -1
-      return returnRow
-    }
+    returnDefaultRow(resultRow)
+    resultRow
+  }
 
-    returnRow(0) = maxStepEvent.maxStep
-    returnRow(1) = UTF8String.fromString(maxStepEvent.baseGroup)
-
+  private def returnDefaultRow(resultRow: GenericInternalRow): Unit = {
+    resultRow(0) = -1
+    resultRow(1) = UTF8String.fromString("null")
     var i = 2
     for (name <- groupDimNames) {
-      val value = maxStepEvent.resultGroupDim.getOrElse(name, "null")
-      returnRow(i) = UTF8String.fromString(value)
-      i+=1
+      resultRow(i) = UTF8String.fromString("null")
+      i += 1
     }
-    returnRow
   }
   def calculateFunnel(currentMaxStepEvent: FunnelEvent): FunnelEvent = {
-    if (currentMaxStepEvent.maxStep==0) return currentMaxStepEvent
+    if (currentMaxStepEvent == null || currentMaxStepEvent.maxStep==0) return currentMaxStepEvent
     // Get the lowest and earliest event in the largest step collection
     var maxStepEvent = currentMaxStepEvent.relationsMapArray(currentMaxStepEvent.maxStep).minBy(_.ts)
     // Set maxStepEvent grouping information

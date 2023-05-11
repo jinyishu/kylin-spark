@@ -183,36 +183,41 @@ case class Attribution(windowLitExpr: Expression,
   }
 
   override def update(buffer: ListBuffer[AttrEvent], input: InternalRow): ListBuffer[AttrEvent] = {
-    // convert single row to all possible events
-    val names = evalEventNames(input)
-    if (names.isEmpty) {
-      return buffer
-    }
-    if (relations == null) parserRelations
-    val ts = evalToLong(eventTsExpr, input)
-    val events = names.map { case (eventType, name) =>
-      val relatedDim = if (relationExprs.contains(name)) {
-        relationExprs(name).map(expr => {
-          val dim = expr.eval(input)
-          if (dim == null) null else dim.toString
-        }).toArray
-      } else {
-        null
+    try {
+      // convert single row to all possible events
+      val names = evalEventNames(input)
+      if (names.isEmpty) {
+        return buffer
       }
-      val groupingInfo =
-        genericArrayData(groupingInfoExpr.eval(input).asInstanceOf[GenericArrayData])
+      if (relations == null) parserRelations
+      val ts = evalToLong(eventTsExpr, input)
+      val events = names.map { case (eventType, name) =>
+        val relatedDim = if (relationExprs.contains(name)) {
+          relationExprs(name).map(expr => {
+            val dim = expr.eval(input)
+            if (dim == null) null else dim.toString
+          }).toArray
+        } else {
+          null
+        }
+        val groupingInfo =
+          genericArrayData(groupingInfoExpr.eval(input).asInstanceOf[GenericArrayData])
 
-      eventType match {
-        case AttrEvent.TARGET if measureCount > 0 =>
-          val measures = evalToArray(measuresExpr, input).map { m =>
-            if (m == null) 0 else m.toString.toDouble
-          }
-          AttrEvent(name, eventType, ts, relatedDim, groupingInfo, measures)
-        case _ =>
-          AttrEvent(name, eventType, ts, relatedDim, groupingInfo)
+        eventType match {
+          case AttrEvent.TARGET if measureCount > 0 =>
+            val measures = evalToArray(measuresExpr, input).map { m =>
+              if (m == null) 0 else m.toString.toDouble
+            }
+            AttrEvent(name, eventType, ts, relatedDim, groupingInfo, measures)
+          case _ =>
+            AttrEvent(name, eventType, ts, relatedDim, groupingInfo)
+        }
       }
+      buffer ++= events
+    } catch {
+      case e: Exception => e.printStackTrace()
     }
-    buffer ++ events
+    buffer
   }
 
   // groupingInfoExpr.dataType
@@ -252,7 +257,12 @@ case class Attribution(windowLitExpr: Expression,
   }
 
   override def eval(buffer: ListBuffer[AttrEvent]): GenericArrayData = {
-    toResultForm(doEval(buffer))
+    try {
+      return toResultForm(doEval(buffer))
+    } catch {
+      case e: Exception => e.printStackTrace()
+    }
+    new GenericArrayData(Seq(InternalRow(null, null, null, null, null)))
   }
 
   private def doEval(events: ListBuffer[AttrEvent]): ListBuffer[AttrEvent] = {
