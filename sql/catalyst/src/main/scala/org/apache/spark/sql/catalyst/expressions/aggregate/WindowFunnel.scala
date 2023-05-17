@@ -255,9 +255,6 @@ case class WindowFunnel(windowLit: Expression,
         returnDefaultRow(resultRow)
         return resultRow
       }
-      if (maxStepEvent.maxStep == 0) {
-        maxStepEvent.resultGroupDim = maxStepEvent.groupDim
-      }
       resultRow(0) = maxStepEvent.maxStep
       resultRow(1) = UTF8String.fromString(maxStepEvent.baseGroup)
       var i = 2
@@ -333,6 +330,11 @@ case class WindowFunnel(windowLit: Expression,
         startEvents.append(event)
         if (event.groupDim != null) {
           event.resultGroupDim = mutable.HashMap[String, String]()
+          for ((x, y) <- event.groupDim) {
+            if (x.startsWith("0") || x.startsWith("user")) {
+              event.resultGroupDim.put(x, y)
+            }
+          }
         }
         if (currentMaxStepEvent == null) {
           currentMaxStepEvent = event
@@ -405,6 +407,11 @@ case class WindowFunnel(windowLit: Expression,
       if (event.eid == 0) {
         if (event.groupDim != null) {
           event.resultGroupDim = mutable.HashMap[String, String]()
+          for ((x, y) <- event.groupDim) {
+            if (x.startsWith("0") || x.startsWith("user")) {
+              event.resultGroupDim.put(x, y)
+            }
+          }
         }
         if (currentMaxStepEvent == null) {
           currentMaxStepEvent = event
@@ -458,6 +465,11 @@ case class WindowFunnel(windowLit: Expression,
       if (event.eids.contains(0)) {
         if (event.groupDim != null) {
           event.resultGroupDim = mutable.HashMap[String, String]()
+          for ((x, y) <- event.groupDim) {
+            if (x.startsWith("0")  || x.startsWith("user")) {
+              event.resultGroupDim.put(x, y)
+            }
+          }
         }
         if (currentMaxStepEvent == null) {
           currentMaxStepEvent = event
@@ -512,6 +524,11 @@ case class WindowFunnel(windowLit: Expression,
         startEvents.append(event)
         if (event.groupDim != null) {
           event.resultGroupDim = mutable.HashMap[String, String]()
+          for ((x, y) <- event.groupDim) {
+            if (x.startsWith("0") || x.startsWith("user")) {
+              event.resultGroupDim.put(x, y)
+            }
+          }
         }
         if (currentMaxStepEvent == null) {
           currentMaxStepEvent = event
