@@ -255,6 +255,9 @@ case class WindowFunnel(windowLit: Expression,
         returnDefaultRow(resultRow)
         return resultRow
       }
+      if (maxStepEvent.maxStep == 0) {
+        maxStepEvent.resultGroupDim = maxStepEvent.groupDim
+      }
       resultRow(0) = maxStepEvent.maxStep
       resultRow(1) = UTF8String.fromString(maxStepEvent.baseGroup)
       var i = 2
