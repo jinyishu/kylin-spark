@@ -274,7 +274,8 @@ case class Attribution(windowLitExpr: Expression,
     val targetEvents = mutable.Queue[AttrEvent]()
     val resultEvents = mutable.HashSet[AttrEvent]()
     // count the number of all source events  by group
-    val counts: mutable.HashMap[(String, String), SourceCount] = mutable.HashMap[(String, String), SourceCount]()
+    val counts: mutable.HashMap[(String, String), (SourceCount, SourceCount)] =
+      mutable.HashMap[(String, String), (SourceCount, SourceCount)]()
     var aheadTrueName: mutable.HashSet[String] = null
     var aheadTrue: mutable.ListBuffer[AttrEvent] = null
     for (event <- sorted) {
@@ -295,10 +296,14 @@ case class Attribution(windowLitExpr: Expression,
           targetEvents.enqueue(event)
         case AttrEvent.SOURCE =>
           // count
-          val sc: SourceCount = counts.getOrElseUpdate(
-            (event.name, event.groupingInfos), SourceCount(0L)
+          val sc: (SourceCount, SourceCount) = counts.getOrElseUpdate(
+            (event.name, event.groupingInfos), (SourceCount(0L), SourceCount(0L))
           )
-          sc.count += 1
+          sc._1.count += 1
+          if (targetEvents.nonEmpty) {
+            // valid count
+            sc._2.count += 1
+          }
           // check and enqueue source events
           for (target <- targetEvents) {
             eventRelationType match {
@@ -343,7 +348,7 @@ case class Attribution(windowLitExpr: Expression,
 
     val resultEventsBuffer = ListBuffer[AttrEvent]()
     resultEventsBuffer ++= resultEvents ++= counts.map( e => {
-      AttrEvent(e._1._1, -1, e._2.count, null, e._1._2)
+      AttrEvent(e._1._1, -1, e._2._1.count, null, e._1._2, null, e._2._2.count.toDouble)
     })
   }
 
@@ -469,7 +474,7 @@ case class Attribution(windowLitExpr: Expression,
               else new GenericArrayData(
                 e.groupingInfos.split("\\|").map(s => UTF8String.fromString(s))
               ),
-              e.ts)
+              e.ts, e.contrib.toLong)
           } else {
             InternalRow(e.utf8Name, e.contrib,
               if (e.measureContrib == null) null else new GenericArrayData(e.measureContrib),
@@ -477,7 +482,7 @@ case class Attribution(windowLitExpr: Expression,
               else new GenericArrayData(
                 e.groupingInfos.split("\\|").map(s => UTF8String.fromString(s))
               ),
-              1L
+              null, null
             )
           }
       )
@@ -494,7 +499,8 @@ case class Attribution(windowLitExpr: Expression,
         StructField("contrib", DoubleType),
         StructField("measureContrib", ArrayType(DoubleType)),
         StructField("groupingInfos", ArrayType(StringType)),
-        StructField("count", LongType)
+        StructField("allCount", LongType),
+        StructField("validCount", LongType)
       )))
     dataTypeValue
   }
