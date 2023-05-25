@@ -282,7 +282,7 @@ case class Attribution(windowLitExpr: Expression,
       // check out of window sequence and do calculation
       while (targetEvents.nonEmpty &&
         (!withinWindow(event, targetEvents.front)
-          // valid count
+          // Last modelType need valid count
           // || targetEvents.front.last != null
           )) {
         val target = targetEvents.dequeue()
@@ -360,7 +360,7 @@ case class Attribution(windowLitExpr: Expression,
       case FIRST =>
         target.first = event // only update first
         // when sourceEvents is empty will be judged as direct conversion
-        // only push once
+        // sourceEvents cannot empty , only push once
         if (target.sourceEvents.isEmpty) target.sourceEvents.push(event)
       case LAST =>
         if (target.last == null) target.last = event // only update last
