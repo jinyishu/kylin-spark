@@ -281,7 +281,10 @@ case class Attribution(windowLitExpr: Expression,
     for (event <- sorted) {
       // check out of window sequence and do calculation
       while (targetEvents.nonEmpty &&
-        (!withinWindow(event, targetEvents.front) || targetEvents.front.last != null)) {
+        (!withinWindow(event, targetEvents.front)
+          // valid count
+          // || targetEvents.front.last != null
+          )) {
         val target = targetEvents.dequeue()
         resultEvents ++= calculateContrib(target)
       }
