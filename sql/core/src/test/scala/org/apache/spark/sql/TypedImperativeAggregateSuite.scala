@@ -254,25 +254,27 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
         "event.name, --  s1 s2 s3 s4 d, d -> Direct conversion \n" +
         "event.groupingInfos[0] by1, -- maybe null\n" +
         "event.groupingInfos[1] by2,-- maybe null\n" +
-        "sum(case when event.contrib = -1 then event.count else 0 end) count_pv_all, \n" +
+        "sum(case when event.contrib = -1.0 then event.allCount else 0 end) count_pv_all, \n" +
         "sum(\n" +
-        "case when event.contrib > -1 then event.count else 0 end \n" +
+        "case when event.contrib = -1.0 then event.validCount else 0 end \n" +
         ") count_pv_valid,  \n" +
         "count(\n" +
-        "distinct case when event.contrib = -1 then uid else null end\n" +
+        "distinct case when event.contrib = -1.0 then uid else null end\n" +
         ") count_uv_all,  \n" +
         "count(\n" +
-        "distinct case when event.contrib > -1 then uid else null end\n" +
+        "distinct case " +
+        "when event.name = 'd' then null " +
+        "when event.contrib > -1.0 then uid else null end\n" +
         ") count_uv_valid, \n" +
-        "sum(case when event.contrib > -1 then event.contrib else 0 end) sum_contrib,  \n" +
+        "sum(case when event.contrib > -1.0 then event.contrib else 0 end) sum_contrib,  \n" +
         "sum(\n" +
-        "case when event.contrib > -1 then event.measureContrib[0] else 0 end \n" +
+        "case when event.contrib > -1.0 then event.measureContrib[0] else 0 end \n" +
         ") sum_measure_contrib -- maybe null \n" +
         "from ( \n" +
         "select uid, explode(at) as event from (\n" +
         "select \n" +
         "uid, \n" +
-        "attribution(\n" +
+        "attribution_analysis(\n" +
         "100, \n" +
         "ts, \n" +
         "case \n" +

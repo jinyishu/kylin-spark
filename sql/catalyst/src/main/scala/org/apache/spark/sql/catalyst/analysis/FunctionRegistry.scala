@@ -302,7 +302,7 @@ object FunctionRegistry {
     expression[Min]("min"),
     expression[MinBy]("min_by"),
     expression[Percentile]("percentile"),
-    expression[WindowFunnel]("window_funnel"),
+    expression[WindowFunnel]("window_funnel_analysis"),
     expression[Skewness]("skewness"),
     expression[ApproximatePercentile]("percentile_approx"),
     expression[ApproximatePercentile]("approx_percentile", true),
@@ -322,11 +322,11 @@ object FunctionRegistry {
     expression[BoolOr]("any", true),
     expression[BoolOr]("some", true),
     expression[BoolOr]("bool_or"),
-    expression[Attribution]("attribution"),
+    expression[Attribution]("attribution_analysis"),
     expression[CompressBitmapBuild]("compress_bitmap_build"),
     expression[CompressBitmapContains]("compress_bitmap_contains"),
     expression[CompressGetBitmap]("compress_get_bitmap"),
-    expression[Interval]("interval"),
+    expression[Interval]("interval_analysis"),
 
     // string functions
     expression[Ascii]("ascii"),

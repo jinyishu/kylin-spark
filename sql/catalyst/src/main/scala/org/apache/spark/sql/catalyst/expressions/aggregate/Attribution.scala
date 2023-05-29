@@ -392,7 +392,9 @@ case class Attribution(windowLitExpr: Expression,
   private def calculateContrib(target: AttrEvent): mutable.Stack[AttrEvent] = {
     if (target.sourceEvents.isEmpty) {
       val st = mutable.Stack[AttrEvent]()
-      st.push(AttrEvent("d", AttrEvent.SOURCE, 0, Array(), null))
+      st.push(AttrEvent(
+        "d", AttrEvent.SOURCE, 0, Array(), target.groupingInfos, target.measureContrib, 1.0
+      ))
       return st
     }
     modelType match {
