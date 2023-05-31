@@ -352,7 +352,7 @@ case class Interval(startEventExpr: Expression,
       val result = ListBuffer[IntervalEvent]()
       // aggDate
       buffer.groupBy(_.aggDateType).foreach(group => {
-        val sorted = group._2.sortBy(_.ts)
+        val sorted = group._2.sortBy(e => ( e.ts, e.eventType))
         modelType match {
           case SIMPLE => doSimpleEval(sorted, result)
           case SIMPLE_REL => doSimpleRelEval(sorted, result)

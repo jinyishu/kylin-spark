@@ -1916,6 +1916,196 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       assert(result == actual)
     }
   }
+  test("single user path test") {
+    {
+      val result = "[2023-02-13,a1,22];" +
+        "[2023-02-13,a3,766];" +
+        "[2023-02-13,a6,2000];" +
+        "[2023-02-13,a11,1000]"
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,sid
+         from values
+        (1, 1, '2023-02-15 00:00:01', 'a1','b1','s1'),
+        (1, 2, '2023-02-15 00:00:02', 'a1','b1','s1'),
+        (1, 3, '2023-02-15 00:00:03', 'a2','b2','s1'),
+        (1, 4, '2023-02-15 00:00:04', 'a3','b3','s1'),
+        (1, 5, '2023-02-15 00:00:05', 'a1','b1','s1'),
+
+        (1, 1, '2023-02-15 00:00:10', 'a1','b1','s2'),
+        (1, 3, '2023-02-15 00:00:11', 'a2','b2','s2'),
+        (1, 3, '2023-02-15 00:00:12', 'a3','b3','s2'),
+        (1, 1, '2023-02-15 00:00:13', 'a1','b1','s2'),
+        (1, 4, '2023-02-15 00:00:14', 'a1','b1','s2'),
+
+        (1, 1, '2023-02-15 00:00:21', 'a2','b2','s3'),
+        (1, 4, '2023-02-15 00:00:22', 'a3','b3','s3'),
+        (1, 1, '2023-02-15 00:00:23', 'a1','b1','s3'),
+        (1, 2, '2023-02-15 00:00:24', 'a1','b1','s3'),
+        (1, 5, '2023-02-15 00:00:25', 'a2','b2','s3'),
+
+        (1, 1, '2023-02-15 00:00:36', 'a3','b3','s4'),
+        (1, 5, '2023-02-15 00:00:37', 'a3','b3','s4'),
+        (1, 2, '2023-02-15 00:00:38', 'a3','b3','s4'),
+        (1, 4, '2023-02-15 00:00:39', 'a3','b3','s4'),
+        (1, 3, '2023-02-15 00:00:40', 'a3','b3','s4'),
+
+        (1, 1, '2023-02-15 00:00:51', 'a3','b3','s5'),
+        (1, 1, '2023-02-15 00:00:52', 'a3','b3','s5'),
+        (1, 4, '2023-02-15 00:00:53', 'a3','b3','s5'),
+        (1, 5, '2023-02-15 00:00:54', 'a3','b3','s5'),
+        (1, 3, '2023-02-15 00:00:55', 'a3','b3','s5'),
+
+        (2, 3, '2023-02-15 00:00:26', 'a3','b3','s6'),
+        (2, 2, '2023-02-15 00:00:27', 'a3','b3','s6'),
+        (2, 5, '2023-02-15 00:00:28', 'a3','b3','s6')
+        AS test(user_id,event_id,event_time,dim1,dim2,sid)
+      ),
+      tmp1 as (
+        select user_id, user_path_analysis(
+          event_time,
+          case
+          when event_id = 1  then 1
+          when event_id = 2  then 2
+          when event_id = 3  then 3
+          when event_id = 4  then 4
+          when event_id = 5  then 5
+          else -1 end,
+          case when event_id = 2  then dim1 else null end,
+          'START',
+          1,
+          true,
+          sid,
+          8000
+        ) seq
+        from tmp0 group by user_id
+      ),
+      tmp2 as(
+      select user_id,explode(seq) as up
+      from tmp1
+      ),
+      tmp3 as(
+      select
+       user_id,(user_id || '-' || up.sid) as sid,up.seqNum,up.eid,up.eidBy,up.nextEid,up.nextEidBy
+      from tmp2
+      )
+      -- select * from tmp3 order by sid asc , seqNum asc
+      select seqNum , eid, eidBy ,nextEid ,nextEidBy,
+      count(distinct sid) sid_cnt,
+      compress_bitmap_build(user_id) bm
+      from tmp3
+      group by 1,2,3,4,5
+      order by 1 asc,6 desc
+    """.stripMargin
+      )
+      /*
+
+       */
+
+      df.show(100, false)
+      //      val actual = df.collect().mkString(";")
+      //                        println(actual)
+      //      assert(result == actual)
+    }
+  }
+
+
+  test("user path test") {
+    {
+      val df = spark.sql(
+        """
+      with tmp0 as (
+        select user_id,event_id,
+        cast(event_time as timestamp),
+        dim1,dim2,sid
+         from values
+        (1, 1, '2023-02-15 00:00:00.01', 'a1','b1','s1'),
+        (1, 2, '2023-02-15 00:00:00.02', 'a1','b1','s1'),
+        (1, 3, '2023-02-15 00:00:00.03', 'a2','b2','s1'),
+        (1, 4, '2023-02-15 00:00:00.04', 'a3','b3','s1'),
+        (1, 5, '2023-02-15 00:00:00.05', 'a1','b1','s1'),
+
+        (1, 1, '2023-02-15 00:00:00.06', 'a1','b1','s2'),
+        (1, 3, '2023-02-15 00:00:00.07', 'a2','b2','s2'),
+        (1, 3, '2023-02-15 00:00:00.08', 'a3','b3','s2'),
+        (1, 1, '2023-02-15 00:00:00.09', 'a1','b1','s2'),
+        (1, 4, '2023-02-15 00:00:00.10', 'a1','b1',null),
+
+        (1, 1, '2023-02-15 00:00:00.11', 'a2','b2',''),
+        (1, 4, '2023-02-15 00:00:00.12', 'a3','b3','s3'),
+        (1, 1, '2023-02-15 00:00:00.13', 'a1','b1','s3'),
+        (1, 2, '2023-02-15 00:00:00.14', 'a1','b1','s3'),
+        (1, 5, '2023-02-15 00:00:00.15', 'a2','b2','s3'),
+
+        (1, 1, '2023-02-15 00:00:00.16', 'a3','b3','s4'),
+        (1, 5, '2023-02-15 00:00:00.17', 'a3','b3','s4'),
+        (1, 2, '2023-02-15 00:00:00.18', 'a3','b3','s4'),
+        (1, 4, '2023-02-15 00:00:00.19', 'a3','b3','s4'),
+        (1, 3, '2023-02-15 00:00:00.20', 'a3','b3','s4'),
+
+        (1, 1, '2023-02-15 00:00:00.21', 'a3','b3','s5'),
+        (1, 1, '2023-02-15 00:00:00.22', 'a3','b3','s5'),
+        (1, 4, '2023-02-15 00:00:00.23', 'a3','b3','s5'),
+        (1, 5, '2023-02-15 00:00:00.24', 'a3','b3','s5'),
+        (1, 3, '2023-02-15 00:00:00.25', 'a3','b3','s5'),
+
+        (2, 3, '2023-02-15 00:00:00.26', 'a3','b3','s6'),
+        (2, 2, '2023-02-15 00:00:00.27', 'a3','b3','s6'),
+        (2, 5, '2023-02-15 00:00:00.28', 'a3','b3','s6')
+        AS test(user_id,event_id,event_time,dim1,dim2,sid)
+      ),
+      tmp1 as (
+        select user_id, user_path_analysis(
+          event_time,
+          case
+          when event_id = 1  then 1
+          when event_id = 2  then 2
+          when event_id = 3  then 3
+          when event_id = 4  then 4
+          when event_id = 5  then 5
+          else -1 end,
+          case when event_id = 2  then dim1 else null end,
+          'START',
+          1,
+          -- dim1 = 'a3' or dim2 = 'b2',
+          true,
+          sid,
+          0
+        ) seq
+        from tmp0 group by user_id
+      ),
+      tmp2 as(
+      select user_id,explode(seq) as up
+      from tmp1
+      ),
+      tmp3 as(
+      select
+       user_id,(user_id || '-' || up.sid) as sid,up.seqNum,
+       up.eid,up.eidBy,up.nextEid,up.nextEidBy
+      from tmp2
+      ),
+      -- select * from tmp3 order by sid asc , seqNum asc
+      select
+         seqNum ,
+         eid,
+         eidBy,
+         nextEid,
+         nextEidBy,
+        count(distinct sid) sid_cnt,
+        compress_bitmap_build(user_id) bm
+        from tmp3
+        group by 1,2,3,4,5
+        order by 1 asc,6 desc
+
+    """.stripMargin
+      )
+      df.show(100, false)
+    }
+  }
+
 }
 
 object TypedImperativeAggregateSuite {
