@@ -2086,7 +2086,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
        user_id,(user_id || '-' || up.sid) as sid,up.seqNum,
        up.eid,up.eidBy,up.nextEid,up.nextEidBy
       from tmp2
-      ),
+      )
       -- select * from tmp3 order by sid asc , seqNum asc
       select
          seqNum ,
