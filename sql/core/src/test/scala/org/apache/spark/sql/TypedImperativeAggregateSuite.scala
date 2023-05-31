@@ -2080,23 +2080,17 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
       tmp2 as(
       select user_id,explode(seq) as up
       from tmp1
-      ),
-      tmp3 as(
-      select
-       user_id,(user_id || '-' || up.sid) as sid,up.seqNum,
-       up.eid,up.eidBy,up.nextEid,up.nextEidBy
-      from tmp2
       )
-      -- select * from tmp3 order by sid asc , seqNum asc
+      -- select * from tmp2 order by sid asc , seqNum asc
       select
-         seqNum ,
-         eid,
-         eidBy,
-         nextEid,
-         nextEidBy,
-        count(distinct sid) sid_cnt,
+         up.seqNum ,
+         up.eid,
+         up.eidBy,
+         up.nextEid,
+         up.nextEidBy,
+        count(distinct user_id , up.sid) sid_cnt,
         compress_bitmap_build(user_id) bm
-        from tmp3
+        from tmp2
         group by 1,2,3,4,5
         order by 1 asc,6 desc
 
