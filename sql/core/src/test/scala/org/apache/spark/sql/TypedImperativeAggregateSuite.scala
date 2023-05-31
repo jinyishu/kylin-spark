@@ -2088,7 +2088,7 @@ class TypedImperativeAggregateSuite extends QueryTest with SharedSparkSession {
          up.eidBy,
          up.nextEid,
          up.nextEidBy,
-        count(distinct user_id , up.sid) sid_cnt,
+        count(1) sid_cnt,
         compress_bitmap_build(user_id) bm
         from tmp2
         group by 1,2,3,4,5
